@@ -13,6 +13,7 @@ Supported shapes
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass, field
 from typing import Dict, Literal, Mapping, Optional, Union
 
@@ -22,6 +23,7 @@ from .types import BenchmarkResult, MultiModelBenchmark
 from .paired import PairwiseMatrix, all_pairwise
 from .ranking import RankDistribution, MeanAdvantageResult, bootstrap_ranks, bootstrap_mean_advantage
 from .variance import RobustnessResult, SeedVarianceResult, robustness_metrics, seed_variance_decomposition
+from .tokens import TokenUsage, TokenAnalysisResult, analyze_tokens
 
 
 # ---------------------------------------------------------------------------
@@ -99,6 +101,7 @@ class AnalysisBundle:
     robustness: RobustnessResult
     rank_dist: RankDistribution
     seed_variance: Optional[SeedVarianceResult] = None
+    token_analysis: Optional[TokenAnalysisResult] = None
 
 
 @dataclass
@@ -152,6 +155,7 @@ AnalysisResult = Union[AnalysisBundle, Dict[str, AnalysisBundle], MultiModelBund
 def analyze(
     result: Union[BenchmarkResult, MultiModelBenchmark],
     *,
+    token_usage: Optional[TokenUsage] = None,
     evaluator_mode: Literal["aggregate", "per_evaluator"] = "aggregate",
     reference: str = "grand_mean",
     method: Literal["bootstrap", "bca", "auto"] = "auto",
@@ -174,6 +178,13 @@ def analyze(
     ----------
     result : BenchmarkResult or MultiModelBenchmark
         The benchmark data to analyze.
+    token_usage : TokenUsage, optional
+        Token counts (input and/or output) aligned to the benchmark
+        templates and inputs.  When provided, ``AnalysisBundle`` is
+        extended with a ``token_analysis`` field containing per-template
+        token CIs, pairwise token comparisons, and a Pareto frontier
+        analysis combining token cost with performance.  Only supported
+        for ``BenchmarkResult`` in ``evaluator_mode='aggregate'``.
     evaluator_mode : str
         ``'aggregate'`` (default) analyzes the evaluator-averaged score
         matrix. ``'per_evaluator'`` runs analyses separately for each
@@ -232,6 +243,13 @@ def analyze(
     # Multi-model path
     # ------------------------------------------------------------------
     if isinstance(result, MultiModelBenchmark):
+        if token_usage is not None:
+            warnings.warn(
+                "token_usage is not yet supported for MultiModelBenchmark "
+                "and will be ignored. Pass a BenchmarkResult instead.",
+                UserWarning,
+                stacklevel=2,
+            )
         if evaluator_mode == "per_evaluator":
             raise NotImplementedError(
                 "evaluator_mode='per_evaluator' is not yet supported for "
@@ -259,9 +277,28 @@ def analyze(
     _validate_supported(shape)
 
     if evaluator_mode == "aggregate":
-        return _analyze_single(result=result, shape=shape, **kwargs)
+        bundle = _analyze_single(result=result, shape=shape, **kwargs)
+        if token_usage is not None:
+            _validate_token_usage(token_usage, result)
+            bundle.token_analysis = analyze_tokens(
+                token_usage,
+                bundle.pairwise,
+                method=method,
+                ci=ci,
+                n_bootstrap=n_bootstrap,
+                correction=correction,
+                rng=rng,
+            )
+        return bundle
 
     # per_evaluator mode — only applies to the 4-D (N, M, R, K) case.
+    if token_usage is not None:
+        warnings.warn(
+            "token_usage is ignored when evaluator_mode='per_evaluator'. "
+            "Token analysis only runs in aggregate mode.",
+            UserWarning,
+            stacklevel=2,
+        )
     has_evaluator_axis = result.scores.ndim == 4
     evaluator_names = result.evaluator_names if has_evaluator_axis else ["score"]
 
@@ -435,6 +472,47 @@ def _analyze_multi_model(
 
 
 # ---------------------------------------------------------------------------
+# Token usage validation
+# ---------------------------------------------------------------------------
+
+def _validate_token_usage(
+    token_usage: TokenUsage,
+    result: BenchmarkResult,
+) -> None:
+    """Raise ValueError if token_usage is incompatible with the benchmark."""
+    if token_usage.template_labels != result.template_labels:
+        raise ValueError(
+            "token_usage.template_labels does not match benchmark template_labels.\n"
+            f"  token_usage: {token_usage.template_labels}\n"
+            f"  benchmark:   {result.template_labels}"
+        )
+    if token_usage.input_labels != result.input_labels:
+        raise ValueError(
+            "token_usage.input_labels does not match benchmark input_labels.\n"
+            f"  token_usage: {token_usage.input_labels}\n"
+            f"  benchmark:   {result.input_labels}"
+        )
+    N, M = result.n_templates, result.n_inputs
+    out = token_usage.output_tokens
+    if out.ndim not in (2, 3):
+        raise ValueError(
+            f"token_usage.output_tokens must be 2-D (N, M) or 3-D (N, M, R); "
+            f"got shape {out.shape}."
+        )
+    if out.shape[:2] != (N, M):
+        raise ValueError(
+            f"token_usage.output_tokens shape {out.shape} is incompatible with "
+            f"benchmark (N={N}, M={M}). Expected first two dims ({N}, {M})."
+        )
+    if token_usage.input_tokens is not None:
+        inp = token_usage.input_tokens
+        if inp.shape != (N, M):
+            raise ValueError(
+                f"token_usage.input_tokens shape {inp.shape} must be ({N}, {M})."
+            )
+
+
+# ---------------------------------------------------------------------------
 # Shape detection and validation
 # ---------------------------------------------------------------------------
 
@@ -522,7 +600,7 @@ def print_analysis_summary(
         return
 
     for evaluator_name, bundle in analysis.items():
-        print(f"=== Evaluator: {evaluator_name} ===")
+        _print_loud_section(f"Evaluator: {evaluator_name}")
         _print_bundle_summary(
             bundle,
             top_pairwise=top_pairwise,
@@ -531,13 +609,21 @@ def print_analysis_summary(
         print()
 
 
+def _print_loud_section(title: str) -> None:
+    heading = f" {title.upper()} "
+    border = "=" * len(heading)
+    print(border)
+    print(heading)
+    print(border)
+
+
 def _print_multi_model_summary(
     bundle: MultiModelBundle,
     *,
     top_pairwise: int,
     line_width: int,
 ) -> None:
-    print("=== Multi-Model Analysis Summary ===")
+    _print_loud_section("Multi-Model Analysis Summary")
     print(f"Shape: {bundle.shape}")
     print(
         f"Models: {bundle.benchmark.n_models} | "
@@ -551,22 +637,37 @@ def _print_multi_model_summary(
     print(f"Best pair: model='{best_model}'  template='{best_template}'")
     print()
 
-    print("--- Model-Level Comparison (mean across all prompts) ---")
+    print("Model-level comparison (mean across all prompts):")
     _print_bundle_summary(
         bundle.model_level,
         top_pairwise=top_pairwise,
         line_width=line_width,
+        item_singular="model",
+        item_plural="models",
     )
 
+    # Instability across runs across models 
+    instability_rows = _collect_cross_model_seed_instability_rows(bundle)
+    if instability_rows:
+        _print_cross_model_seed_instability(bundle, rows=instability_rows)
+        most_stable_model, instability, *_ = instability_rows[0]
+        print(
+            "  -> Most stable model across runs: "
+            f"'{most_stable_model}' "
+            f"(instability={instability:.4f}, {_instability_label(instability)})"
+        )
+
     for model_label, model_bundle in bundle.per_model.items():
-        print(f"\n--- Per-Model: '{model_label}' ---")
+        print()
+        _print_loud_section(f"Per-Model Summary: {model_label}")
         _print_bundle_summary(
             model_bundle,
             top_pairwise=top_pairwise,
             line_width=line_width,
         )
 
-    print("\n=== Cross-Model Ranking (all model/template pairs) ===")
+    print()
+    _print_loud_section("Cross-Model Ranking (all model/template pairs)")
     print(
         f"  {len(bundle.cross_model.rank_dist.labels)} pairs ranked. "
         f"Top 5 by P(Best):"
@@ -584,6 +685,8 @@ def _print_bundle_summary(
     *,
     top_pairwise: int,
     line_width: int,
+    item_singular: str = "template",
+    item_plural: str = "templates",
 ) -> None:
     template_col_width = 24
     pair_col_width = 32
@@ -591,8 +694,10 @@ def _print_bundle_summary(
     print("=== Analysis Summary ===")
     print(f"Shape: {bundle.shape}")
     n_runs = bundle.benchmark.n_runs
+    item_singular_title = item_singular.capitalize()
+    item_plural_title = item_plural.capitalize()
     print(
-        f"Templates: {bundle.benchmark.n_templates} | "
+        f"{item_plural_title}: {bundle.benchmark.n_templates} | "
         f"Inputs: {bundle.benchmark.n_inputs}"
         + (f" | Runs: {n_runs}" if n_runs > 1 else "")
     )
@@ -603,7 +708,7 @@ def _print_bundle_summary(
     print()
 
     print("--- Rank Probabilities ---")
-    print(f"  {'Template':<24s} {'P(Best)':>9s} {'E[Rank]':>9s}")
+    print(f"  {item_singular_title:<24s} {'P(Best)':>9s} {'E[Rank]':>9s}")
     for i, label in enumerate(bundle.rank_dist.labels):
         print(
             f"  {label:<24s} "
@@ -635,9 +740,9 @@ def _print_bundle_summary(
     )
     ma_low = -ma_max_abs
     ma_high = ma_max_abs
-    print(f"  axis: [{ma_low:+.3f}, {ma_high:+.3f}]  (· spread, ─ CI, ● mean, │ zero)")
+    print(f"  axis: [{ma_low:+.3f}, {ma_high:+.3f}]  (· spread, ─ CI, ● mean, │ zero)  spread percentiles = ({low_p:g}, {high_p:g})")
     print(
-        f"  {'Template':<{template_col_width}s} {'Interval Plot':<{line_width}s} {'Mean':>8s} "
+        f"  {item_singular_title:<{template_col_width}s} {'Interval Plot':<{line_width}s} {'Mean':>8s} "
         f"{'CI Low':>9s} {'CI High':>9s} {'Spread Lo':>10s} {'Spread Hi':>10s}"
     )
     for i, label in enumerate(bundle.mean_advantage.labels):
@@ -661,7 +766,6 @@ def _print_bundle_summary(
             f"{bundle.mean_advantage.spread_low[i]:>+9.3f} "
             f"{bundle.mean_advantage.spread_high[i]:>+9.3f}"
         )
-    print(f"  spread percentiles = ({low_p:g}, {high_p:g})")
     print()
 
     print("--- Pairwise Comparisons (lowest p-value first) ---")
@@ -726,7 +830,201 @@ def _print_bundle_summary(
     
     # Seed variance section (only when seeded data is present).
     if bundle.seed_variance is not None:
-        _print_seed_variance(bundle.seed_variance, template_col_width=template_col_width)
+        print()
+        _print_seed_variance(
+            bundle.seed_variance,
+            template_col_width=template_col_width,
+            item_singular=item_singular,
+        )
+
+    # Token usage & Pareto analysis (only when token_usage was provided).
+    if bundle.token_analysis is not None:
+        print()
+        _print_token_pareto_summary(bundle.token_analysis, bundle)
+
+
+def _print_token_pareto_summary(
+    token_analysis: TokenAnalysisResult,
+    bundle: AnalysisBundle,
+) -> None:
+    """Print Option 2 (dual-bar table) and Option 3 (quality ladder).
+
+    Option 2 shows a per-template table of token CIs alongside score means,
+    with Pareto status markers.  Option 3 shows a quality ladder sorted by
+    score for Pareto-optimal templates only, with marginal score gain and
+    token cost between adjacent steps — backed by the existing pairwise CIs.
+    """
+    stats = token_analysis.stats
+    frontier = set(token_analysis.pareto_frontier)
+    dominated_by = token_analysis.dominated_by
+    labels = stats.labels
+    N = len(labels)
+
+    score_means = bundle.robustness.mean          # (N,) — mean scores
+    ci_pct = int(round(stats.ci * 100))
+    M = bundle.benchmark.n_inputs
+    has_input = stats.mean_input is not None
+
+    col_type = "Total" if has_input else "Output"
+    note = "(input + output)" if has_input else "(output tokens only; input not provided)"
+
+    BAR_W = 8
+
+    # Pre-format token strings to compute alignment widths.
+    tok_strs = [f"{int(round(float(stats.mean_total[i]))):,}" for i in range(N)]
+    ci_strs = [
+        f"[{int(round(float(stats.ci_low_total[i]))):,}\u2013"
+        f"{int(round(float(stats.ci_high_total[i]))):,}]"
+        for i in range(N)
+    ]
+    max_tok_w = max(len(s) for s in tok_strs)
+    max_ci_w = max(len(s) for s in ci_strs)
+    tpl_w = max(16, min(28, max(len(l) for l in labels)))
+
+    max_tokens = float(np.max(stats.mean_total))
+    score_lo = float(np.min(score_means))
+    score_hi = float(np.max(score_means))
+    score_range = max(score_hi - score_lo, 1e-9)
+
+    # -----------------------------------------------------------------------
+    # Option 2: dual-bar table
+    # -----------------------------------------------------------------------
+    print(f"--- Token Usage vs. Performance [{col_type} tokens, {ci_pct}% CI] ---")
+    print(f"  {note}  |  bootstrap over {M} inputs")
+    print()
+
+    hdr_tok = f"{col_type} tokens mean [{ci_pct}% CI]"
+    hdr_sc = "Score mean"
+    tok_col_w = max_tok_w + 1 + max_ci_w + 2 + BAR_W
+    sc_col_w = 5 + 2 + BAR_W
+    sep_len = 2 + tpl_w + 2 + tok_col_w + 2 + sc_col_w + 2 + 20
+    print(
+        f"  {'Template':<{tpl_w}s}  "
+        f"{hdr_tok:<{tok_col_w}s}  "
+        f"{hdr_sc:<{sc_col_w}s}  "
+        f"Status"
+    )
+    print(f"  {'─' * sep_len}")
+
+    for i, label in enumerate(labels):
+        # Token bar — normalized to max mean total.
+        mean_tok = float(stats.mean_total[i])
+        filled_tok = int(round(mean_tok / max_tokens * BAR_W)) if max_tokens > 0 else 0
+        filled_tok = max(0, min(filled_tok, BAR_W))
+        tok_bar = "\u2588" * filled_tok + "\u2591" * (BAR_W - filled_tok)
+
+        # Score bar — normalized to [min, max] range.
+        mean_sc = float(score_means[i])
+        filled_sc = int(round((mean_sc - score_lo) / score_range * BAR_W))
+        filled_sc = max(0, min(filled_sc, BAR_W))
+        sc_bar = "\u2588" * filled_sc + "\u2591" * (BAR_W - filled_sc)
+
+        # Status marker.
+        if label in dominated_by:
+            doms = dominated_by[label]
+            dom_str = _truncate_label(doms[0], 18)
+            if len(doms) > 1:
+                dom_str += f" +{len(doms) - 1}"
+            status = f"\u00b7 ({dom_str})"
+        else:
+            status = "\u2605"  # ★
+
+        tok_part = (
+            f"{tok_strs[i]:>{max_tok_w}s} {ci_strs[i]:<{max_ci_w}s}  {tok_bar}"
+        )
+        sc_part = f"{mean_sc:.3f}  {sc_bar}"
+        print(
+            f"  {_truncate_label(label, tpl_w):<{tpl_w}s}  "
+            f"{tok_part}  "
+            f"{sc_part}  "
+            f"{status}"
+        )
+
+    print(f"  {'─' * sep_len}")
+    print(
+        f"  \u2605 Pareto-optimal   "
+        f"\u00b7 dominated by (statistically confirmed, {ci_pct}% CI)"
+    )
+    print()
+
+    # -----------------------------------------------------------------------
+    # Option 3: quality ladder (Pareto-optimal only, sorted by score)
+    # -----------------------------------------------------------------------
+    frontier_sorted = sorted(
+        list(frontier),
+        key=lambda lbl: float(score_means[labels.index(lbl)]),
+    )
+    n_excluded = N - len(frontier_sorted)
+
+    print("--- Quality Ladder (Pareto-optimal only, sorted by score) ---")
+    if n_excluded > 0:
+        excluded = [l for l in labels if l not in frontier]
+        ex_str = ", ".join(
+            f"'{_truncate_label(l, 20)}'" for l in excluded
+        )
+        s = "s" if n_excluded > 1 else ""
+        print(f"  {n_excluded} dominated template{s} excluded: {ex_str}")
+    print()
+
+    for rank, lbl in enumerate(frontier_sorted):
+        i = labels.index(lbl)
+        mean_sc = float(score_means[i])
+        mean_tok = float(stats.mean_total[i])
+        ci_lo = float(stats.ci_low_total[i])
+        ci_hi = float(stats.ci_high_total[i])
+        tok_ci_str = f"[{int(round(ci_lo)):,}\u2013{int(round(ci_hi)):,}]"
+        print(
+            f"  {mean_sc:.3f}  {_truncate_label(lbl, 24):<24s}  "
+            f"{int(round(mean_tok)):,} tok {tok_ci_str}"
+        )
+
+        if rank < len(frontier_sorted) - 1:
+            next_lbl = frontier_sorted[rank + 1]
+            j = labels.index(next_lbl)
+
+            # Marginal score gain (next − current).
+            try:
+                sc_r = bundle.pairwise.get(next_lbl, lbl)
+                sc_diff_pp = sc_r.mean_diff * 100
+                sc_ci_lo_pp = sc_r.ci_low * 100
+                sc_ci_hi_pp = sc_r.ci_high * 100
+                sc_note = (
+                    f", sig. p={sc_r.p_value:.3g}"
+                    if sc_r.significant
+                    else f", p={sc_r.p_value:.3g}"
+                )
+            except KeyError:
+                sc_diff_pp = (float(score_means[j]) - float(score_means[i])) * 100
+                sc_ci_lo_pp = sc_ci_hi_pp = sc_diff_pp
+                sc_note = ""
+
+            # Marginal token cost (next − current).
+            try:
+                tok_r = token_analysis.pairwise.get(next_lbl, lbl)
+                tok_diff = tok_r.mean_diff
+                tok_ci_lo = tok_r.ci_low
+                tok_ci_hi = tok_r.ci_high
+                tok_note = (
+                    f", sig. p={tok_r.p_value:.3g}"
+                    if tok_r.significant
+                    else f", p={tok_r.p_value:.3g}"
+                )
+            except KeyError:
+                tok_diff = float(stats.mean_total[j]) - float(stats.mean_total[i])
+                tok_ci_lo = tok_ci_hi = tok_diff
+                tok_note = ""
+
+            sc_part = (
+                f"{sc_diff_pp:+.1f}pp "
+                f"[{sc_ci_lo_pp:+.1f}\u2013{sc_ci_hi_pp:+.1f}{sc_note}]"
+            )
+            tok_part = (
+                f"{int(round(tok_diff)):+,} tok "
+                f"[{int(round(tok_ci_lo)):+,}\u2013{int(round(tok_ci_hi)):+,}{tok_note}]"
+            )
+            print(f"   \u2191 {sc_part}   {tok_part}")
+
+    print()
 
 
 _BLOCK_CHARS = "▁▂▃▄▅▆▇█"
@@ -785,6 +1083,7 @@ def _print_seed_variance(
     sv: SeedVarianceResult,
     template_col_width: int = 24,
     strip_width: int = 24,
+    item_singular: str = "template",
 ) -> None:
     """Print seed variance decomposition with per-input heat strip.
 
@@ -805,7 +1104,7 @@ def _print_seed_variance(
     )
     num_w = 10
     print(
-        f"  {'Template':<{template_col_width}s}  "
+        f"  {item_singular.capitalize():<{template_col_width}s}  "
         f"{'Per-input noise':<{strip_width}s}  "
         f"{'seed_std':>{num_w}s}  "
         f"{'input_std':>{num_w}s}  "
@@ -826,6 +1125,93 @@ def _print_seed_variance(
             f"{np.sqrt(sv.total_var[i]):>{num_w}.4f}  "
             f"{instability:>{num_w}.4f}  "
             f"{_instability_label(instability)}"
+        )
+    print()
+
+
+def _collect_cross_model_seed_instability_rows(
+    bundle: MultiModelBundle,
+) -> list[tuple[str, float, float, float, str, float]]:
+    """Collect sorted per-model instability rows for summary tables.
+
+    Returns rows sorted by ascending overall instability.
+    """
+    rows: list[tuple[str, float, float, float, str, float]] = []
+    for model_label, model_bundle in bundle.per_model.items():
+        sv = model_bundle.seed_variance
+        if sv is None:
+            continue
+
+        overall_instability = float(np.mean(sv.per_cell_seed_std))
+        template_instability_mean = float(np.mean(sv.instability))
+        template_instability_std = float(np.std(sv.instability, ddof=0))
+
+        noisiest_idx = int(np.argmax(sv.instability))
+        noisiest_template = sv.labels[noisiest_idx]
+        noisiest_value = float(sv.instability[noisiest_idx])
+
+        rows.append(
+            (
+                model_label,
+                overall_instability,
+                template_instability_mean,
+                template_instability_std,
+                noisiest_template,
+                noisiest_value,
+            )
+        )
+
+    rows.sort(key=lambda row: row[1])
+    return rows
+
+
+def _print_cross_model_seed_instability(
+    bundle: MultiModelBundle,
+    *,
+    rows: Optional[list[tuple[str, float, float, float, str, float]]] = None,
+) -> None:
+    """Print cross-model instability comparison when seed variance is available.
+
+    Aggregates over templates and inputs so each model has one at-a-glance
+    instability score (mean per-cell seed std), plus template-level spread.
+    """
+    if rows is None:
+        rows = _collect_cross_model_seed_instability_rows(bundle)
+
+    if len(rows) == 0:
+        return
+
+    print("\n--- Cross-Model Instability (across templates & inputs) ---")
+    print(
+        "  lower is better (more stable): "
+        "instability = mean within-cell run std"
+    )
+    model_w = max(16, min(34, max(len(row[0]) for row in rows)))
+    print(
+        f"  {'Model':<{model_w}s} "
+        f"{'instability':>12s} "
+        f"{'tpl_mean':>10s} "
+        f"{'tpl_std':>9s} "
+        f"{'Noisiest template':<24s} "
+        "Verdict"
+    )
+
+    for (
+        model_label,
+        overall_instability,
+        template_instability_mean,
+        template_instability_std,
+        noisiest_template,
+        noisiest_value,
+    ) in rows:
+        noisiest_desc = f"{_truncate_label(noisiest_template, 16)} ({noisiest_value:.4f})"
+        print(
+            f"  {_truncate_label(model_label, model_w):<{model_w}s} "
+            f"{overall_instability:>12.4f} "
+            f"{template_instability_mean:>10.4f} "
+            f"{template_instability_std:>9.4f} "
+            f"{noisiest_desc:<24s} "
+            f"{_instability_label(overall_instability)}"
         )
     print()
 
