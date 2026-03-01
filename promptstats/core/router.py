@@ -1,18 +1,19 @@
 """Central router for selecting the appropriate analysis pipeline.
 
 Inspects the 'shape' of the input — number of models, prompt templates,
-input variables, and evaluators — and dispatches to the correct analysis
-functions. Raises informative errors for shapes that are not yet supported.
+input variables, evaluators, and runs — and dispatches to the correct
+analysis functions. Raises informative errors for shapes that are not yet
+supported.
 
 Supported shapes
 ----------------
-* models=1, prompts>1, input_vars=1, evaluators>=1  →  AnalysisBundle
-* models>1, prompts>1, input_vars=1, evaluators>=1  →  MultiModelBundle
+* models=1, prompts>1, input_vars=1, runs>=1, evaluators>=1  →  AnalysisBundle
+* models>1, prompts>1, input_vars=1, runs>=1, evaluators>=1  →  MultiModelBundle
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, Literal, Mapping, Optional, Union
 
 import numpy as np
@@ -20,7 +21,7 @@ import numpy as np
 from .types import BenchmarkResult, MultiModelBenchmark
 from .paired import PairwiseMatrix, all_pairwise
 from .ranking import RankDistribution, MeanAdvantageResult, bootstrap_ranks, bootstrap_mean_advantage
-from .variance import RobustnessResult, robustness_metrics
+from .variance import RobustnessResult, SeedVarianceResult, robustness_metrics, seed_variance_decomposition
 
 
 # ---------------------------------------------------------------------------
@@ -43,19 +44,23 @@ class BenchmarkShape:
         input is a single value; >1 when input_labels are tuples
         representing a cross-product of variables.
     n_evaluators : int
-        Number of evaluators/scorers. 1 when scores are aggregated
-        (2D or 3D); >1 when an evaluator axis is present (3D or 4D).
+        Number of evaluators/scorers.
+    n_runs : int
+        Number of repeated runs (seeds) per cell. 1 means no seed dimension.
     """
 
     n_models: int
     n_prompts: int
     n_input_vars: int
     n_evaluators: int
+    n_runs: int = 1
 
     def __repr__(self) -> str:
+        runs_str = f", runs={self.n_runs}" if self.n_runs > 1 else ""
         return (
             f"BenchmarkShape(models={self.n_models}, prompts={self.n_prompts}, "
-            f"input_vars={self.n_input_vars}, evaluators={self.n_evaluators})"
+            f"input_vars={self.n_input_vars}, evaluators={self.n_evaluators}"
+            f"{runs_str})"
         )
 
 
@@ -79,9 +84,12 @@ class AnalysisBundle:
         Mean advantage of each template over a reference, with
         epistemic CI and intrinsic spread bands.
     robustness : RobustnessResult
-        Per-template robustness and variance metrics.
+        Per-template robustness and variance metrics (on cell means).
     rank_dist : RankDistribution
         Bootstrap distribution over template rankings.
+    seed_variance : SeedVarianceResult or None
+        Seed-variance decomposition (instability scores).  Present only
+        when the benchmark carries R >= 3 repeated runs.
     """
 
     benchmark: BenchmarkResult
@@ -90,6 +98,7 @@ class AnalysisBundle:
     mean_advantage: MeanAdvantageResult
     robustness: RobustnessResult
     rank_dist: RankDistribution
+    seed_variance: Optional[SeedVarianceResult] = None
 
 
 @dataclass
@@ -113,17 +122,12 @@ class MultiModelBundle:
         Detected structural properties used for routing.
     per_model : dict[str, AnalysisBundle]
         One full analysis bundle per model, keyed by model label.
-        Each bundle uses the same inputs and templates as the overall
-        benchmark.
     model_level : AnalysisBundle
         Analysis where each 'template' is a model, scored by its mean
-        performance across all prompts. Use this to compare models
-        independent of any single prompt choice.
+        performance across all prompts.
     cross_model : AnalysisBundle
         Analysis of all N_models * N_templates (model, template) pairs
-        treated as a flat list of 'templates'. Labels are formatted as
-        ``"<model> / <template>"``. Use rank_dist.p_best or
-        mean_advantage to identify the top-performing pair.
+        treated as a flat list of 'templates'.
     best_pair : tuple[str, str]
         The (model_label, template_label) pair with the highest
         probability of ranking first in the cross_model analysis.
@@ -160,52 +164,42 @@ def analyze(
 ) -> AnalysisResult:
     """Run all standard analyses for a benchmark result.
 
-    Inspects the shape of the input and dispatches to the appropriate
-    analysis pipeline. All sub-analyses share the same random state for
-    reproducibility.
-
-    Supported inputs
-    ----------------
-    BenchmarkResult (models=1, prompts>1, input_vars=1, evaluators>=1)
-        Returns an AnalysisBundle, or dict[str, AnalysisBundle] when
-        evaluator_mode='per_evaluator'.
-
-    MultiModelBenchmark (models>1, prompts>1, input_vars=1, evaluators>=1)
-        Returns a MultiModelBundle containing per-model bundles, a
-        model-level comparison, and a cross-model ranking of all
-        (model, template) pairs.
+    When the benchmark includes a runs axis with R >= 3, all bootstrap
+    analyses automatically use a two-level (nested) resample that propagates
+    seed variance into confidence intervals and rank distributions.
+    ``AnalysisBundle.seed_variance`` is populated with the per-template
+    variance decomposition (instability scores).
 
     Parameters
     ----------
     result : BenchmarkResult or MultiModelBenchmark
         The benchmark data to analyze.
     evaluator_mode : str
-        'aggregate' (default) analyzes the evaluator-averaged score
-        matrix. 'per_evaluator' runs analyses separately for each
+        ``'aggregate'`` (default) analyzes the evaluator-averaged score
+        matrix. ``'per_evaluator'`` runs analyses separately for each
         evaluator and returns a dict keyed by evaluator label.
         Not supported for MultiModelBenchmark.
     reference : str
-        Reference for mean advantage: 'grand_mean' (default) or a
+        Reference for mean advantage: ``'grand_mean'`` (default) or a
         template label to compare all others against.
     method : str
-        Statistical method for CIs and p-values: 'auto' (default),
-        'bootstrap', or 'bca'. 'auto' selects BCa for 15–200 inputs.
+        Statistical method for CIs and p-values: ``'auto'`` (default),
+        ``'bootstrap'``, or ``'bca'``.
     ci : float
         Confidence level for bootstrap intervals (default 0.95).
     n_bootstrap : int
         Number of bootstrap resamples (default 10,000).
     correction : str
-        Multiple comparisons correction for pairwise tests:
-        'holm' (default), 'bonferroni', 'fdr_bh', or 'none'.
+        Multiple comparisons correction: ``'holm'`` (default),
+        ``'bonferroni'``, ``'fdr_bh'``, or ``'none'``.
     spread_percentiles : tuple[float, float]
-        Percentiles for the intrinsic variance band in the mean
-        advantage result (default (10, 90)).
+        Percentiles for the intrinsic variance band in mean advantage
+        (default ``(10, 90)``).
     failure_threshold : float, optional
-        If provided, computes the fraction of inputs scoring below
-        this value in robustness metrics.
+        If provided, computes the fraction of inputs scoring below this
+        value in robustness metrics.
     rng : np.random.Generator, optional
-        Random number generator for reproducibility. Shared across
-        all analysis calls.
+        Random number generator for reproducibility.
 
     Returns
     -------
@@ -218,9 +212,7 @@ def analyze(
     ValueError
         If the benchmark has fewer than 2 prompt templates.
     NotImplementedError
-        If the benchmark shape is not yet supported (cross-product
-        inputs, or evaluator_mode='per_evaluator' with
-        MultiModelBenchmark).
+        If the benchmark shape is not yet supported.
     """
     if rng is None:
         rng = np.random.default_rng()
@@ -269,17 +261,21 @@ def analyze(
     if evaluator_mode == "aggregate":
         return _analyze_single(result=result, shape=shape, **kwargs)
 
-    # per_evaluator mode
-    evaluator_names = result.evaluator_names if not result.is_aggregated else ["score"]
-    outputs: Dict[str, AnalysisBundle] = {}
+    # per_evaluator mode — only applies to the 4-D (N, M, R, K) case.
+    has_evaluator_axis = result.scores.ndim == 4
+    evaluator_names = result.evaluator_names if has_evaluator_axis else ["score"]
 
-    if result.is_aggregated:
-        outputs["score"] = _analyze_single(result=result, shape=shape, **kwargs)
+    if not has_evaluator_axis:
+        outputs: Dict[str, AnalysisBundle] = {
+            "score": _analyze_single(result=result, shape=shape, **kwargs)
+        }
         return outputs
 
+    outputs = {}
     for evaluator_idx, evaluator_name in enumerate(evaluator_names):
+        # Slice out one evaluator, keeping the run axis intact → (N, M, R).
         evaluator_result = BenchmarkResult(
-            scores=result.scores[:, :, evaluator_idx],
+            scores=result.scores[:, :, :, evaluator_idx],
             template_labels=result.template_labels,
             input_labels=result.input_labels,
             input_metadata=result.input_metadata,
@@ -311,28 +307,35 @@ def _analyze_single(
     failure_threshold: Optional[float],
     rng: np.random.Generator,
 ) -> AnalysisBundle:
-    scores_2d = result.get_2d_scores()
+    # Use get_run_scores() so that all analysis functions receive either
+    # (N, M, R) with R >= 3 (seeded nested bootstrap) or (N, M, 1) which
+    # they will collapse to (N, M) and treat as non-seeded.
+    run_scores = result.get_run_scores()   # (N, M, R) or (N, M, 1)
     labels = result.template_labels
 
     pairwise = all_pairwise(
-        scores_2d, labels,
+        run_scores, labels,
         method=method, ci=ci, n_bootstrap=n_bootstrap,
         correction=correction, rng=rng,
     )
     mean_adv = bootstrap_mean_advantage(
-        scores_2d, labels,
+        run_scores, labels,
         reference=reference,
         method=method, ci=ci, n_bootstrap=n_bootstrap,
         spread_percentiles=spread_percentiles, rng=rng,
     )
     robustness = robustness_metrics(
-        scores_2d, labels,
+        run_scores, labels,
         failure_threshold=failure_threshold,
     )
     rank_dist = bootstrap_ranks(
-        scores_2d, labels,
+        run_scores, labels,
         n_bootstrap=n_bootstrap, rng=rng,
     )
+
+    seed_var = None
+    if result.is_seeded:
+        seed_var = seed_variance_decomposition(run_scores, labels)
 
     return AnalysisBundle(
         benchmark=result,
@@ -341,6 +344,7 @@ def _analyze_single(
         mean_advantage=mean_adv,
         robustness=robustness,
         rank_dist=rank_dist,
+        seed_variance=seed_var,
     )
 
 
@@ -368,13 +372,13 @@ def _analyze_multi_model(
         rng=rng,
     )
 
-    # Per-model bundles: one full analysis per model using existing pipeline.
     per_model: Dict[str, AnalysisBundle] = {}
     single_model_shape = BenchmarkShape(
         n_models=1,
         n_prompts=shape.n_prompts,
         n_input_vars=shape.n_input_vars,
         n_evaluators=shape.n_evaluators,
+        n_runs=shape.n_runs,
     )
     for model_label in result.model_labels:
         model_result = result.get_model_result(model_label)
@@ -384,14 +388,13 @@ def _analyze_multi_model(
             **kwargs,
         )
 
-    # Model-level bundle: models are treated as 'templates', each scored
-    # by its mean across all prompts. Answers "which model is best overall?"
     model_mean_result = result.get_model_mean_result()
     model_level_shape = BenchmarkShape(
         n_models=shape.n_models,
-        n_prompts=shape.n_models,   # models play the role of templates here
+        n_prompts=shape.n_models,
         n_input_vars=shape.n_input_vars,
         n_evaluators=shape.n_evaluators,
+        n_runs=shape.n_runs,
     )
     model_level = _analyze_single(
         result=model_mean_result,
@@ -399,14 +402,13 @@ def _analyze_multi_model(
         **kwargs,
     )
 
-    # Cross-model bundle: all (model, template) pairs as a flat template list.
-    # Answers "what is the single best model-prompt combination?"
     flat_result = result.get_flat_result()
     flat_shape = BenchmarkShape(
         n_models=shape.n_models,
         n_prompts=shape.n_models * shape.n_prompts,
         n_input_vars=shape.n_input_vars,
         n_evaluators=shape.n_evaluators,
+        n_runs=shape.n_runs,
     )
     cross_model = _analyze_single(
         result=flat_result,
@@ -414,9 +416,6 @@ def _analyze_multi_model(
         **kwargs,
     )
 
-    # Decode the winning flat index back to (model, template).
-    # get_flat_result() uses row-major order (all templates for model 0,
-    # then model 1, …), so: model_idx = flat_idx // n_templates.
     best_flat_idx = int(np.argmax(cross_model.rank_dist.p_best))
     best_model_idx = best_flat_idx // result.n_templates
     best_template_idx = best_flat_idx % result.n_templates
@@ -442,16 +441,12 @@ def _analyze_multi_model(
 def _detect_shape(
     result: Union[BenchmarkResult, MultiModelBenchmark],
 ) -> BenchmarkShape:
-    """Infer the structural shape of a benchmark input.
-
-    For BenchmarkResult, n_models is always 1. For MultiModelBenchmark,
-    n_models reflects the actual number of models. n_input_vars is
-    inferred from input_labels: tuple labels signal a cross-product.
-    """
+    """Infer the structural shape of a benchmark input."""
     if isinstance(result, MultiModelBenchmark):
         n_models = result.n_models
         n_prompts = result.n_templates
-        n_evaluators = 1 if result.is_aggregated else result.scores.shape[3]
+        n_evaluators = result.n_evaluators
+        n_runs = result.n_runs
         if result.input_labels and isinstance(result.input_labels[0], tuple):
             n_input_vars = len(result.input_labels[0])
         else:
@@ -461,12 +456,14 @@ def _detect_shape(
             n_prompts=n_prompts,
             n_input_vars=n_input_vars,
             n_evaluators=n_evaluators,
+            n_runs=n_runs,
         )
 
     # BenchmarkResult
     n_models = 1
     n_prompts = result.n_templates
-    n_evaluators = 1 if result.is_aggregated else result.scores.shape[2]
+    n_evaluators = result.n_evaluators
+    n_runs = result.n_runs
     if result.input_labels and isinstance(result.input_labels[0], tuple):
         n_input_vars = len(result.input_labels[0])
     else:
@@ -476,6 +473,7 @@ def _detect_shape(
         n_prompts=n_prompts,
         n_input_vars=n_input_vars,
         n_evaluators=n_evaluators,
+        n_runs=n_runs,
     )
 
 
@@ -506,18 +504,7 @@ def print_analysis_summary(
     top_pairwise: int = 5,
     line_width: int = 41,
 ) -> None:
-    """Print a concise console summary of analyze() results.
-
-    Parameters
-    ----------
-    analysis : AnalysisBundle, MultiModelBundle, or Mapping[str, AnalysisBundle]
-        Output from analyze(). Accepts any return type.
-    top_pairwise : int
-        Number of pairwise comparisons (sorted by p-value) to print.
-    line_width : int
-        Width of ASCII interval plots for mean advantage and pairwise
-        comparisons.
-    """
+    """Print a concise console summary of analyze() results."""
     if isinstance(analysis, MultiModelBundle):
         _print_multi_model_summary(
             analysis,
@@ -556,6 +543,7 @@ def _print_multi_model_summary(
         f"Models: {bundle.benchmark.n_models} | "
         f"Templates: {bundle.benchmark.n_templates} | "
         f"Inputs: {bundle.benchmark.n_inputs}"
+        + (f" | Runs: {bundle.benchmark.n_runs}" if bundle.benchmark.n_runs > 1 else "")
     )
     model_str = ", ".join(bundle.benchmark.model_labels)
     print(f"Models: {model_str}")
@@ -602,15 +590,24 @@ def _print_bundle_summary(
 
     print("=== Analysis Summary ===")
     print(f"Shape: {bundle.shape}")
+    n_runs = bundle.benchmark.n_runs
     print(
         f"Templates: {bundle.benchmark.n_templates} | "
         f"Inputs: {bundle.benchmark.n_inputs}"
+        + (f" | Runs: {n_runs}" if n_runs > 1 else "")
     )
     print()
 
     print("--- Robustness ---")
     print(bundle.robustness.summary_table().to_string())
     print()
+
+    # Seed variance section (only when seeded data is present).
+    if bundle.seed_variance is not None:
+        sv = bundle.seed_variance
+        print(f"--- Seed Variance (R={sv.n_runs} runs) ---")
+        print(sv.summary_table().to_string())
+        print()
 
     print("--- Rank Probabilities ---")
     print(f"  {'Template':<24s} {'P(Best)':>9s} {'E[Rank]':>9s}")

@@ -233,11 +233,12 @@ def run_benchmark(client: OpenAI) -> tuple[np.ndarray, list[list[str]]]:
     Returns
     -------
     scores : np.ndarray
-        Shape (N_templates, N_inputs, N_evaluators).
+        Shape ``(N_templates, N_inputs, 1, N_evaluators)`` — the unit runs
+        axis (axis 2) matches the promptstats ``(N, M, R, K)`` convention.
     outputs : list[list[str]]
         Raw model outputs indexed by [template_idx][input_idx].
     """
-    scores  = np.zeros((N_TEMPLATES, N_INPUTS, len(EVALUATORS)))
+    scores  = np.zeros((N_TEMPLATES, N_INPUTS, 1, len(EVALUATORS)))
     outputs = [[None] * N_INPUTS for _ in range(N_TEMPLATES)]
     total   = N_TEMPLATES * N_INPUTS
     done    = 0
@@ -249,7 +250,7 @@ def run_benchmark(client: OpenAI) -> tuple[np.ndarray, list[list[str]]]:
             outputs[t_idx][i_idx] = output
 
             for e_idx, (_, evaluator) in enumerate(EVALUATORS):
-                scores[t_idx, i_idx, e_idx] = evaluator(output, ground_truth)
+                scores[t_idx, i_idx, 0, e_idx] = evaluator(output, ground_truth)
 
             done += 1
             predicted = _extract_label(output) or "???"
@@ -298,12 +299,15 @@ def main():
     for t_idx, t_name in enumerate(TEMPLATE_LABELS):
         row = f"  {t_name:<18s}"
         for e_idx in range(len(EVALUATORS)):
-            row += f"  {raw_scores[t_idx, :, e_idx].mean():>12.3f}"
+            row += f"  {raw_scores[t_idx, :, 0, e_idx].mean():>12.3f}"
         print(row)
     print()
 
     # -----------------------------------------------------------------------
-    # Build BenchmarkResult (3D) — keeps per-evaluator breakdown
+    # Build BenchmarkResult — keeps per-evaluator breakdown.
+    #
+    # raw_scores shape: (N_templates, N_inputs, 1, N_evaluators) — the unit
+    # runs axis is already in place from run_benchmark.
     # -----------------------------------------------------------------------
     result_3d = bps.BenchmarkResult(
         scores=raw_scores,
@@ -313,10 +317,10 @@ def main():
     )
     print(
         f"BenchmarkResult: {result_3d.n_templates} templates × "
-        f"{result_3d.n_inputs} inputs × {len(EVALUATOR_NAMES)} evaluators\n"
+        f"{result_3d.n_inputs} inputs × 1 run × {len(EVALUATOR_NAMES)} evaluators\n"
     )
 
-    # Aggregate to 2D (average across evaluators) for statistical analyses
+    # Aggregate to 2D (average across evaluators) for statistical analyses.
     scores_2d = result_3d.get_2d_scores()  # shape (N_templates, N_inputs)
     rng = np.random.default_rng(0)
 
@@ -384,7 +388,7 @@ def main():
     # Per-evaluator advantage plots
     # -----------------------------------------------------------------------
     for e_idx, e_name in enumerate(EVALUATOR_NAMES):
-        ev_scores = raw_scores[:, :, e_idx]
+        ev_scores = raw_scores[:, :, 0, e_idx]
         ev_result = bps.BenchmarkResult(
             scores=ev_scores,
             template_labels=TEMPLATE_LABELS,

@@ -44,12 +44,3 @@ This packages helps you answer:
 
 We aim to iteratively contribute to `promptstats`. Ideas for future features:
  - Help developers quantify the "variance" of provided prompt templates, and perhaps even factor this into the calculation in an intelligent way.
-
-## Demos
-
-- Single-model analysis (OpenAI):
-	- `python demo_analyze.py`
-- Multi-model comparison (OpenAI vs OpenRouter):
-	- `python demo_compare_models.py`
-	- requires `OPENAI_API_KEY` and `OPENROUTER_API_KEY`
-	- optional: `OPENAI_MODEL`, `OPENROUTER_MODEL`

@@ -238,12 +238,14 @@ def run_multi_model_benchmark(clients: dict[str, OpenAI]) -> tuple[np.ndarray, d
     Returns
     -------
     scores : np.ndarray
-        Shape (N_models, N_templates, N_inputs, N_evaluators).
+        Shape ``(N_models, N_templates, N_inputs, 1, N_evaluators)`` — the
+        unit runs axis (axis 3) matches the promptstats ``(P, N, M, R, K)``
+        convention.
     outputs_by_model : dict[str, list[list[str]]]
         Raw outputs keyed by model label, indexed [template_idx][input_idx].
     """
     n_models = len(MODEL_SPECS)
-    scores = np.zeros((n_models, N_TEMPLATES, N_INPUTS, len(EVALUATORS)))
+    scores = np.zeros((n_models, N_TEMPLATES, N_INPUTS, 1, len(EVALUATORS)))
     outputs_by_model: dict[str, list[list[str]]] = {
         spec["label"]: [[""] * N_INPUTS for _ in range(N_TEMPLATES)]
         for spec in MODEL_SPECS
@@ -265,7 +267,7 @@ def run_multi_model_benchmark(clients: dict[str, OpenAI]) -> tuple[np.ndarray, d
                 outputs_by_model[model_label][t_idx][i_idx] = output
 
                 for e_idx, (_, evaluator) in enumerate(EVALUATORS):
-                    scores[m_idx, t_idx, i_idx, e_idx] = evaluator(output, ground_truth)
+                    scores[m_idx, t_idx, i_idx, 0, e_idx] = evaluator(output, ground_truth)
 
                 done += 1
                 predicted = _extract_label(output) or "???"
@@ -296,6 +298,8 @@ def demo_compare_models() -> None:
     elapsed = time.time() - t0
     print(f"\nCompleted in {elapsed:.1f}s\n")
 
+    # raw_scores shape: (N_models, N_templates, N_inputs, 1, N_evaluators) —
+    # the unit runs axis is already in place from run_multi_model_benchmark.
     multi_result = bps.MultiModelBenchmark(
         scores=raw_scores,
         model_labels=model_labels,
@@ -307,7 +311,7 @@ def demo_compare_models() -> None:
     print(
         f"MultiModelBenchmark: {multi_result.n_models} models × "
         f"{multi_result.n_templates} templates × {multi_result.n_inputs} inputs × "
-        f"{len(EVALUATOR_NAMES)} evaluators\n"
+        f"1 run × {len(EVALUATOR_NAMES)} evaluators\n"
     )
 
     print("=== analyze(..., evaluator_mode='aggregate') ===")

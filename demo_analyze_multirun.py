@@ -1,15 +1,15 @@
-"""Demo: Real LLM evaluation using promptstats analyze router.
+"""Demo: Real LLM evaluation using promptstats analyze router — multiple runs.
 
-Calls gpt-4.1-nano to classify the sentiment of customer reviews using prompt
-template variants, scores outputs with code-based evaluators, and then runs
-`promptstats.analyze` in both aggregate and per-evaluator modes.
+Like demo_analyze.py but runs each (template, input) pair N_RUNS=3 times with
+temperature > 0, populating the runs axis of BenchmarkResult so that
+promptstats can account for within-template variability.
 
 Requirements:
     pip install openai
     export OPENAI_API_KEY="sk-..."
 
 Usage:
-    python demo_analyze.py
+    python demo_analyze_multirun.py
 """
 
 import math
@@ -43,17 +43,15 @@ INPUTS = [
     ("Average quality. Neither impressed nor disappointed.",                   "NEUTRAL"),
     ("Shipping was fast and the item looks great. Very happy.",                "POSITIVE"),
     ("The color is different from the photos. Feels cheap.",                   "NEGATIVE"),
-    ("It arrived on time. Haven't tested it fully yet.",                       "NEUTRAL"),
     ("Incredibly sturdy build. Worth every penny.",                            "POSITIVE"),
-    ("Instructions were confusing and a piece was missing.",                   "NEGATIVE"),
     ("Decent enough for the price. Not amazing.",                              "NEUTRAL"),
     ("Surpassed my expectations in every way!",                                "POSITIVE"),
     ("Completely useless. Don't waste your time.",                             "NEGATIVE"),
     ("It's okay. I've seen better but I've also seen worse.",                  "NEUTRAL"),
 
     # --- Challenging: sarcasm (surface words are positive, meaning is negative) ---
-    ("Oh wonderful, it broke on the very first day. Just what I always wanted.",   "NEGATIVE"),
-    ("Sure, I love spending 45 minutes on hold. Best. Support. Ever.",             "NEGATIVE"),
+    ("Oh wonderful, it broke on the very first day.",                              "NEGATIVE"),
+    ("Sure, I love spending 45 minutes on hold.",                                  "NEGATIVE"),
     ("Impressive how something so simple can go so spectacularly wrong.",          "NEGATIVE"),
 
     # --- Challenging: double negatives / hedged language ---
@@ -155,6 +153,8 @@ TEMPLATES = {
 TEMPLATE_LABELS = list(TEMPLATES.keys())
 N_TEMPLATES = len(TEMPLATES)
 N_INPUTS = len(INPUTS)
+N_RUNS = 3
+TEMPERATURE = 0.7  # non-zero so that repeated runs produce meaningful variation
 
 
 # ---------------------------------------------------------------------------
@@ -209,7 +209,7 @@ def call_model(prompt: str, client: OpenAI) -> str:
     response = client.chat.completions.create(
         model=MODEL,
         messages=[{"role": "user", "content": prompt}],
-        temperature=0.0,
+        temperature=TEMPERATURE,
         max_completion_tokens=128,
     )
     return response.choices[0].message.content.strip()
@@ -219,40 +219,42 @@ def call_model(prompt: str, client: OpenAI) -> str:
 # Benchmark runner
 # ---------------------------------------------------------------------------
 
-def run_benchmark(client: OpenAI) -> tuple[np.ndarray, list[list[str]]]:
-    """Call the model for every (template, input) pair and score each output.
+def run_benchmark(client: OpenAI) -> tuple[np.ndarray, list[list[list[str]]]]:
+    """Call the model for every (template, input, run) triple and score outputs.
 
     Returns
     -------
     scores : np.ndarray
-        Shape ``(N_templates, N_inputs, 1, N_evaluators)`` — the unit runs
-        axis (axis 2) matches the promptstats ``(N, M, R, K)`` convention.
-    outputs : list[list[str]]
-        Raw model outputs indexed by [template_idx][input_idx].
+        Shape ``(N_templates, N_inputs, N_runs, N_evaluators)`` matching the
+        promptstats ``(N, M, R, K)`` convention.
+    outputs : list[list[list[str]]]
+        Raw model outputs indexed by [run_idx][template_idx][input_idx].
     """
-    scores = np.zeros((N_TEMPLATES, N_INPUTS, 1, len(EVALUATORS)))
-    outputs = [[None] * N_INPUTS for _ in range(N_TEMPLATES)]
-    total = N_TEMPLATES * N_INPUTS
+    scores = np.zeros((N_TEMPLATES, N_INPUTS, N_RUNS, len(EVALUATORS)))
+    outputs = [[[None] * N_INPUTS for _ in range(N_TEMPLATES)] for _ in range(N_RUNS)]
+    total = N_RUNS * N_TEMPLATES * N_INPUTS
     done = 0
 
-    for t_idx, (t_name, template) in enumerate(TEMPLATES.items()):
-        for i_idx, (text, ground_truth) in enumerate(INPUTS):
-            prompt = template.format(text=text)
-            output = call_model(prompt, client)
-            outputs[t_idx][i_idx] = output
+    for r_idx in range(N_RUNS):
+        print(f"\n--- Run {r_idx + 1}/{N_RUNS} ---")
+        for t_idx, (t_name, template) in enumerate(TEMPLATES.items()):
+            for i_idx, (text, ground_truth) in enumerate(INPUTS):
+                prompt = template.format(text=text)
+                output = call_model(prompt, client)
+                outputs[r_idx][t_idx][i_idx] = output
 
-            for e_idx, (_, evaluator) in enumerate(EVALUATORS):
-                scores[t_idx, i_idx, 0, e_idx] = evaluator(output, ground_truth)
+                for e_idx, (_, evaluator) in enumerate(EVALUATORS):
+                    scores[t_idx, i_idx, r_idx, e_idx] = evaluator(output, ground_truth)
 
-            done += 1
-            predicted = _extract_label(output) or "???"
-            correct = "✓" if predicted == ground_truth else "✗"
-            print(
-                f"  [{done:3d}/{total}] {t_name:<18s} | "
-                f"input {i_idx:02d} | "
-                f"truth={ground_truth:<8s} pred={predicted:<8s} {correct} | "
-                f"'{output[:35]}'"
-            )
+                done += 1
+                predicted = _extract_label(output) or "???"
+                correct = "✓" if predicted == ground_truth else "✗"
+                print(
+                    f"  [{done:3d}/{total}] {t_name:<18s} | "
+                    f"input {i_idx:02d} | "
+                    f"truth={ground_truth:<8s} pred={predicted:<8s} {correct} | "
+                    f"'{output[:35]}'"
+                )
 
     return scores, outputs
 
@@ -272,8 +274,9 @@ def main():
     print(f"Model      : {MODEL}")
     print(f"Templates  : {N_TEMPLATES}  ({', '.join(TEMPLATE_LABELS)})")
     print(f"Inputs     : {N_INPUTS}")
+    print(f"Runs       : {N_RUNS}  (temperature={TEMPERATURE})")
     print(f"Evaluators : {len(EVALUATORS)}  ({', '.join(EVALUATOR_NAMES)})")
-    print(f"Total calls: {N_TEMPLATES * N_INPUTS}\n")
+    print(f"Total calls: {N_RUNS * N_TEMPLATES * N_INPUTS}\n")
 
     print("Running benchmark …")
     t0 = time.time()
@@ -281,9 +284,8 @@ def main():
     elapsed = time.time() - t0
     print(f"\nCompleted in {elapsed:.1f}s\n")
 
-    # raw_scores shape: (N_templates, N_inputs, 1, N_evaluators) — the unit
-    # runs axis is already in place from run_benchmark.
-    result_3d = bps.BenchmarkResult(
+    # raw_scores shape: (N_templates, N_inputs, N_runs, N_evaluators)
+    result = bps.BenchmarkResult(
         scores=raw_scores,
         template_labels=TEMPLATE_LABELS,
         input_labels=INPUT_LABELS,
@@ -291,13 +293,13 @@ def main():
     )
 
     print(
-        f"BenchmarkResult: {result_3d.n_templates} templates × "
-        f"{result_3d.n_inputs} inputs × 1 run × {len(EVALUATOR_NAMES)} evaluators\n"
+        f"BenchmarkResult: {result.n_templates} templates × "
+        f"{result.n_inputs} inputs × {N_RUNS} runs × {len(EVALUATOR_NAMES)} evaluators\n"
     )
 
     print("=== analyze(..., evaluator_mode='aggregate') ===")
     analysis_agg = bps.analyze(
-        result_3d,
+        result,
         evaluator_mode="aggregate",
         reference="grand_mean",
         method="auto",
@@ -311,7 +313,7 @@ def main():
 
     print("=== analyze(..., evaluator_mode='per_evaluator') ===")
     analysis_by_eval = bps.analyze(
-        result_3d,
+        result,
         evaluator_mode="per_evaluator",
         reference="grand_mean",
         method="auto",
@@ -323,7 +325,7 @@ def main():
     bps.print_analysis_summary(analysis_by_eval, top_pairwise=4)
 
     result_2d = bps.BenchmarkResult(
-        scores=result_3d.get_2d_scores(),
+        scores=result.get_2d_scores(),
         template_labels=TEMPLATE_LABELS,
         input_labels=INPUT_LABELS,
     )
@@ -332,12 +334,12 @@ def main():
         reference="grand_mean",
         title=(
             f"Prompt Template Comparison — Sentiment Classification\n"
-            f"({MODEL}, composite score averaged over {len(EVALUATORS)} evaluators)"
+            f"({MODEL}, {N_RUNS} runs, composite score averaged over {len(EVALUATORS)} evaluators)"
         ),
         rng=np.random.default_rng(0),
     )
-    fig.savefig("demo_analyze_advantage.png", dpi=150, bbox_inches="tight")
-    print("Saved: demo_analyze_advantage.png")
+    fig.savefig("demo_analyze_multirun_advantage.png", dpi=150, bbox_inches="tight")
+    print("Saved: demo_analyze_multirun_advantage.png")
 
     print("\nDone!")
 

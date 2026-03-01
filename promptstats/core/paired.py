@@ -3,16 +3,22 @@
 All comparisons are paired by input, since every template is evaluated on the
 same benchmark set. This eliminates input-level variance and dramatically
 increases statistical power compared to unpaired tests.
+
+When the score array includes a run axis (R >= 3), pairwise comparisons use
+a two-level (nested) bootstrap that resamples both inputs and within-cell
+runs, so that seed variance is correctly propagated into confidence intervals
+rather than being silently discarded.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import warnings
+from dataclasses import dataclass, field
 from typing import Literal, Optional
 
 import numpy as np
 
-from .resampling import bca_interval_1d, bootstrap_means_1d
+from .resampling import bca_interval_1d, bootstrap_diffs_nested, bootstrap_means_1d
 
 
 @dataclass
@@ -28,7 +34,8 @@ class PairedDiffResult:
     p_value: float
     test_method: str
     n_inputs: int
-    per_input_diffs: np.ndarray  # shape (M,)
+    per_input_diffs: np.ndarray  # shape (M,) — per-input cell-mean differences
+    n_runs: int = 1              # R used; 1 means no seed dimension
 
     @property
     def significant(self) -> bool:
@@ -69,6 +76,7 @@ class PairwiseMatrix:
                 test_method=r.test_method,
                 n_inputs=r.n_inputs,
                 per_input_diffs=-r.per_input_diffs,
+                n_runs=r.n_runs,
             )
         raise KeyError(f"No comparison found for ({a}, {b})")
 
@@ -99,19 +107,21 @@ def pairwise_differences(
     Parameters
     ----------
     scores : np.ndarray
-        2D score matrix of shape (N_templates, M_inputs).
+        Score matrix of shape ``(N, M)`` or ``(N, M, R)``.
+        When ``R >= 3`` a two-level nested bootstrap is used so that seed
+        variance contributes to the confidence interval.  ``R = 1`` or
+        ``R = 2`` fall back to the standard (non-seeded) path.
     idx_a, idx_b : int
         Indices of the two templates to compare.
     label_a, label_b : str
         Human-readable labels for the templates.
     method : str
-        Statistical method: 'auto' (default), 'bootstrap', or 'bca'.
-        If 'auto', uses BCa for 15 <= M_inputs <= 200 and regular
-        bootstrap otherwise.
+        Statistical method: ``'auto'`` (default), ``'bootstrap'``, or
+        ``'bca'``.  ``'auto'`` selects BCa for 15 ≤ M ≤ 200.
     ci : float
         Confidence level for the interval (default 0.95).
     n_bootstrap : int
-        Number of bootstrap resamples (only used for 'bootstrap' method).
+        Number of bootstrap resamples.
     rng : np.random.Generator, optional
         Random number generator for reproducibility.
 
@@ -122,6 +132,22 @@ def pairwise_differences(
     if rng is None:
         rng = np.random.default_rng()
 
+    # ------------------------------------------------------------------ #
+    # Route: seeded (R >= 3) vs. standard (2-D or R < 3)                 #
+    # ------------------------------------------------------------------ #
+    if scores.ndim == 3:
+        R = scores.shape[2]
+        if R >= 3:
+            return _pairwise_diffs_seeded(
+                scores, idx_a, idx_b, label_a, label_b,
+                method=method, ci=ci, n_bootstrap=n_bootstrap, rng=rng,
+            )
+        # R == 1 or R == 2: collapse to 2-D (warning already issued during validation)
+        scores = scores.mean(axis=2)
+
+    # ------------------------------------------------------------------ #
+    # Standard (non-seeded) path                                          #
+    # ------------------------------------------------------------------ #
     diffs = scores[idx_a] - scores[idx_b]
     m = len(diffs)
     mean_d = float(np.mean(diffs))
@@ -138,12 +164,9 @@ def pairwise_differences(
         for b in range(n_bootstrap):
             idx = rng.choice(m, size=m, replace=True)
             boot_centered_means[b] = np.mean(centered_diffs[idx])
-        # Shift null-centered bootstrap means back by observed mean for CI.
         boot_means = boot_centered_means + mean_d
         ci_low = float(np.percentile(boot_means, 100 * alpha / 2))
         ci_high = float(np.percentile(boot_means, 100 * (1 - alpha / 2)))
-        # Bootstrap p-value (two-sided): estimate tail area under H0 by
-        # centering diffs to enforce a zero-mean null distribution.
         extreme_count = np.sum(np.abs(boot_centered_means) >= abs(mean_d))
         p_value = float((extreme_count + 1) / (n_bootstrap + 1))
         test_name = f"bootstrap (n={n_bootstrap})"
@@ -151,7 +174,6 @@ def pairwise_differences(
     elif resolved_method == "bca":
         boot_means = bootstrap_means_1d(diffs, n_bootstrap=n_bootstrap, rng=rng)
         ci_low, ci_high = bca_interval_1d(diffs, mean_d, boot_means, alpha)
-
         centered_diffs = diffs - mean_d
         boot_centered_means = bootstrap_means_1d(
             centered_diffs, n_bootstrap=n_bootstrap, rng=rng,
@@ -177,6 +199,87 @@ def pairwise_differences(
         test_method=test_name,
         n_inputs=m,
         per_input_diffs=diffs,
+        n_runs=1,
+    )
+
+
+def _pairwise_diffs_seeded(
+    scores: np.ndarray,
+    idx_a: int,
+    idx_b: int,
+    label_a: str,
+    label_b: str,
+    *,
+    method: Literal["bootstrap", "bca", "auto"],
+    ci: float,
+    n_bootstrap: int,
+    rng: np.random.Generator,
+) -> PairedDiffResult:
+    """Seeded paired comparison using a two-level nested bootstrap.
+
+    ``scores`` has shape ``(N, M, R)`` with R >= 3.
+
+    Point estimates are computed from per-input cell means (averaged over
+    runs).  The bootstrap resamples both inputs and within-cell runs so that
+    seed variance is propagated into the CI.  For BCa, the jackknife
+    acceleration is estimated at the input level (leaving one input out at a
+    time), which is the correct primary sampling unit.
+    """
+    M, R = scores.shape[1], scores.shape[2]
+    scores_a = scores[idx_a]   # (M, R)
+    scores_b = scores[idx_b]   # (M, R)
+
+    # Point estimates from cell means.
+    cell_means_a = scores_a.mean(axis=1)    # (M,)
+    cell_means_b = scores_b.mean(axis=1)    # (M,)
+    cell_diffs = cell_means_a - cell_means_b  # (M,)
+
+    mean_d = float(cell_diffs.mean())
+    std_d = float(cell_diffs.std(ddof=1))
+    alpha = 1 - ci
+
+    resolved_method = method
+    if method == "auto":
+        resolved_method = "bca" if 15 <= M <= 200 else "bootstrap"
+
+    # Nested bootstrap replicates of the mean paired cell-mean difference.
+    boot_means = bootstrap_diffs_nested(scores_a, scores_b, n_bootstrap, rng)
+
+    if resolved_method == "bootstrap":
+        ci_low = float(np.percentile(boot_means, 100 * alpha / 2))
+        ci_high = float(np.percentile(boot_means, 100 * (1 - alpha / 2)))
+        # Null-centred: shift bootstrap distribution to have mean 0.
+        boot_centered = boot_means - mean_d
+        extreme_count = np.sum(np.abs(boot_centered) >= abs(mean_d))
+        p_value = float((extreme_count + 1) / (n_bootstrap + 1))
+        test_name = f"nested bootstrap (n={n_bootstrap}, R={R})"
+
+    elif resolved_method == "bca":
+        # BCa: jackknife over inputs (the outer sampling unit) using cell_diffs.
+        ci_low, ci_high = bca_interval_1d(cell_diffs, mean_d, boot_means, alpha)
+        boot_centered = boot_means - mean_d
+        extreme_count = np.sum(np.abs(boot_centered) >= abs(mean_d))
+        p_value = float((extreme_count + 1) / (n_bootstrap + 1))
+        test_name = f"nested bca bootstrap (n={n_bootstrap}, R={R})"
+
+    else:
+        raise ValueError(f"Unknown method: {method}")
+
+    if method == "auto":
+        test_name = f"auto→{test_name}"
+
+    return PairedDiffResult(
+        template_a=label_a,
+        template_b=label_b,
+        mean_diff=mean_d,
+        std_diff=std_d,
+        ci_low=ci_low,
+        ci_high=ci_high,
+        p_value=p_value,
+        test_method=test_name,
+        n_inputs=M,
+        per_input_diffs=cell_diffs,
+        n_runs=R,
     )
 
 
@@ -194,7 +297,8 @@ def all_pairwise(
     Parameters
     ----------
     scores : np.ndarray
-        2D score matrix of shape (N_templates, M_inputs).
+        Score matrix of shape ``(N, M)`` or ``(N, M, R)``.
+        When ``R >= 3`` each comparison uses the nested bootstrap.
     labels : list[str]
         Template labels.
     method : str
@@ -204,8 +308,8 @@ def all_pairwise(
     n_bootstrap : int
         Number of bootstrap resamples.
     correction : str
-        Multiple comparisons correction: 'holm' (default), 'bonferroni',
-        'fdr_bh', or 'none'.
+        Multiple comparisons correction: ``'holm'`` (default),
+        ``'bonferroni'``, ``'fdr_bh'``, or ``'none'``.
     rng : np.random.Generator, optional
         Random number generator for reproducibility.
 
@@ -246,6 +350,7 @@ def all_pairwise(
                 test_method=f"{r.test_method} ({correction}-corrected)",
                 n_inputs=r.n_inputs,
                 per_input_diffs=r.per_input_diffs,
+                n_runs=r.n_runs,
             )
 
     return PairwiseMatrix(labels=labels, results=results, correction_method=correction)
@@ -266,18 +371,18 @@ def vs_baseline(
     Parameters
     ----------
     scores : np.ndarray
-        2D score matrix of shape (N_templates, M_inputs).
+        Score matrix of shape ``(N, M)`` or ``(N, M, R)``.
     labels : list[str]
         Template labels.
     baseline : str
         Label of the baseline template.
     method, ci, n_bootstrap, correction, rng :
-        Same as all_pairwise.
+        Same as ``all_pairwise``.
 
     Returns
     -------
     list[PairedDiffResult]
-        One result per non-baseline template, comparing it to the baseline.
+        One result per non-baseline template.
     """
     if rng is None:
         rng = np.random.default_rng()
@@ -310,6 +415,7 @@ def vs_baseline(
                 test_method=f"{r.test_method} ({correction}-corrected)",
                 n_inputs=r.n_inputs,
                 per_input_diffs=r.per_input_diffs,
+                n_runs=r.n_runs,
             )
             for r, adj_p in zip(results, adjusted)
         ]

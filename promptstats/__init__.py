@@ -3,7 +3,11 @@
 from promptstats.core.types import BenchmarkResult, MultiModelBenchmark
 from promptstats.core.paired import pairwise_differences, all_pairwise, vs_baseline
 from promptstats.core.ranking import bootstrap_ranks, bootstrap_mean_advantage
-from promptstats.core.variance import robustness_metrics
+from promptstats.core.variance import (
+    robustness_metrics,
+    seed_variance_decomposition,
+    SeedVarianceResult,
+)
 from promptstats.core.router import (
     analyze,
     AnalysisBundle,
@@ -25,6 +29,8 @@ __all__ = [
     "bootstrap_ranks",
     "bootstrap_mean_advantage",
     "robustness_metrics",
+    "seed_variance_decomposition",
+    "SeedVarianceResult",
     "analyze",
     "AnalysisBundle",
     "AnalysisResult",
