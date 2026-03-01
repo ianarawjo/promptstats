@@ -111,7 +111,17 @@ class SeedVarianceResult:
     total_var : np.ndarray
         Shape ``(N,)``.  ``seed_var + input_var``.
     instability : np.ndarray
-        Shape ``(N,)``.  ``seed_var / total_var``.  NaN when total_var == 0.
+        Shape ``(N,)``.  ``per_cell_seed_std.mean(axis=1)``: the mean over
+        inputs of the within-cell seed standard deviation.  Directly answers
+        "on average across inputs, how much does the score vary across
+        repeated runs?" in the same units as the score.  Unlike
+        ``seed_fraction`` this does not inflate when total variance is near
+        zero (e.g. a near-perfect template with one bad run).
+    seed_fraction : np.ndarray
+        Shape ``(N,)``.  ``seed_var / total_var``: the ANOVA partition of
+        variance attributable to LLM stochasticity.  Ranges from 0 to 1, but
+        becomes unreliable when ``total_var`` is near zero.  NaN when
+        ``total_var == 0``.
     per_cell_seed_std : np.ndarray
         Shape ``(N, M)``.  Within-cell standard deviation for every
         (template, input) pair, useful for spotting which inputs are
@@ -124,6 +134,7 @@ class SeedVarianceResult:
     input_var: np.ndarray
     total_var: np.ndarray
     instability: np.ndarray
+    seed_fraction: np.ndarray
     per_cell_seed_std: np.ndarray
 
     def summary_table(self):
@@ -136,6 +147,7 @@ class SeedVarianceResult:
             "input_std": np.sqrt(self.input_var),
             "total_std": np.sqrt(self.total_var),
             "instability": self.instability,
+            "seed_fraction": self.seed_fraction,
         }
         return pd.DataFrame(data).set_index("template")
 
@@ -257,7 +269,12 @@ def seed_variance_decomposition(
     total_var = seed_var + input_var                  # (N,)
 
     with np.errstate(divide="ignore", invalid="ignore"):
-        instability = np.where(total_var > 0, seed_var / total_var, np.nan)
+        seed_fraction = np.where(total_var > 0, seed_var / total_var, np.nan)
+
+    # Mean over inputs of within-cell seed std: "on average across inputs,
+    # how much do scores vary run-to-run?"  Does not inflate when total_var
+    # is near zero, unlike the seed_fraction ratio.
+    instability = per_cell_seed_std.mean(axis=1)          # (N,)
 
     return SeedVarianceResult(
         labels=labels,
@@ -266,5 +283,6 @@ def seed_variance_decomposition(
         input_var=input_var,
         total_var=total_var,
         instability=instability,
+        seed_fraction=seed_fraction,
         per_cell_seed_std=per_cell_seed_std,
     )

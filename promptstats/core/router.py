@@ -602,13 +602,6 @@ def _print_bundle_summary(
     print(bundle.robustness.summary_table().to_string())
     print()
 
-    # Seed variance section (only when seeded data is present).
-    if bundle.seed_variance is not None:
-        sv = bundle.seed_variance
-        print(f"--- Seed Variance (R={sv.n_runs} runs) ---")
-        print(sv.summary_table().to_string())
-        print()
-
     print("--- Rank Probabilities ---")
     print(f"  {'Template':<24s} {'P(Best)':>9s} {'E[Rank]':>9s}")
     for i, label in enumerate(bundle.rank_dist.labels):
@@ -730,6 +723,111 @@ def _print_bundle_summary(
 
     if max_pairs == 0:
         print("  (no pairwise comparisons)")
+    
+    # Seed variance section (only when seeded data is present).
+    if bundle.seed_variance is not None:
+        _print_seed_variance(bundle.seed_variance, template_col_width=template_col_width)
+
+
+_BLOCK_CHARS = "▁▂▃▄▅▆▇█"
+
+
+def _seed_noise_strip(
+    per_cell_values: np.ndarray,
+    scale_max: float,
+    max_width: int = 40,
+) -> str:
+    """One Unicode block char per input, scaled against ``scale_max``.
+
+    If there are more inputs than ``max_width``, inputs are averaged into
+    bins first so the strip always fits within the column.
+    """
+    m = len(per_cell_values)
+    if m == 0:
+        return ""
+    if scale_max <= 0:
+        return _BLOCK_CHARS[0] * min(m, max_width)
+    if m > max_width:
+        bins = np.array_split(per_cell_values, max_width)
+        values = np.array([b.mean() for b in bins])
+    else:
+        values = per_cell_values
+    chars = []
+    for v in values:
+        idx = int(round(float(v) / scale_max * (len(_BLOCK_CHARS) - 1)))
+        chars.append(_BLOCK_CHARS[max(0, min(idx, len(_BLOCK_CHARS) - 1))])
+    return "".join(chars)
+
+
+def _instability_label(instability: float) -> str:
+    """Map an instability score (mean per-cell seed std) to a plain-language description.
+
+    Thresholds are calibrated for scores normalised to roughly [0, 1].
+    ``instability`` is the mean over inputs of the within-cell seed std,
+    so a value of 0.10 means scores typically shift by ±0.10 across runs.
+    """
+    if np.isnan(instability):
+        return "—"
+    if instability >= 0.35:
+        return "near-random across runs"
+    if instability >= 0.20:
+        return "highly noisy across runs"
+    if instability >= 0.10:
+        return "moderately noisy across runs"
+    if instability >= 0.05:
+        return "mostly stable across runs"
+    if instability >= 0.01:
+        return "very stable across runs"
+    return "effectively deterministic across runs"
+
+
+def _print_seed_variance(
+    sv: SeedVarianceResult,
+    template_col_width: int = 24,
+    strip_width: int = 24,
+) -> None:
+    """Print seed variance decomposition with per-input heat strip.
+
+    Each bar encodes the per-cell instability contribution:
+    ``per_cell_seed_var[j] / total_var``.  Because these values average to
+    ``instability`` across inputs, the mean bar height directly corresponds
+    to the reported instability score, while the bar *distribution* reveals
+    whether noise is concentrated on a few inputs or spread uniformly.
+    """
+    print(f"--- Per-input Variance Across Runs (R={sv.n_runs} runs) ---")
+    # Scale strip bars globally against the noisiest single cell so that
+    # templates with low per-cell noise show short bars even if their
+    # seed_fraction is high due to near-zero total_var.
+    global_cell_max = float(sv.per_cell_seed_std.max())
+    print(
+        f"  key: ▁–█ = per-input noise   "
+        f"(globally scaled; █ = {global_cell_max:.4f})"
+    )
+    num_w = 10
+    print(
+        f"  {'Template':<{template_col_width}s}  "
+        f"{'Per-input noise':<{strip_width}s}  "
+        f"{'seed_std':>{num_w}s}  "
+        f"{'input_std':>{num_w}s}  "
+        f"{'total_std':>{num_w}s}  "
+        f"{'instability':>{num_w}s}  "
+        f"Verdict"
+    )
+    for i, label in enumerate(sv.labels):
+        strip = _seed_noise_strip(
+            sv.per_cell_seed_std[i], global_cell_max, max_width=strip_width
+        )
+        instability = float(sv.instability[i])
+        print(
+            f"  {_truncate_label(label, template_col_width):<{template_col_width}s}  "
+            f"{strip:<{strip_width}s}  "
+            f"{np.sqrt(sv.seed_var[i]):>{num_w}.4f}  "
+            f"{np.sqrt(sv.input_var[i]):>{num_w}.4f}  "
+            f"{np.sqrt(sv.total_var[i]):>{num_w}.4f}  "
+            f"{instability:>{num_w}.4f}  "
+            f"{_instability_label(instability)}"
+        )
+    print()
 
 
 def _ascii_interval_line(

@@ -3,6 +3,10 @@
 Copies the workflow of demo_analyze.py, but runs two models and routes through
 the MultiModelBenchmark path in `promptstats.core.router.analyze`.
 
+Like demo_analyze_multirun.py, this version runs each (model, template, input)
+triple multiple times (N_RUNS=3) with temperature > 0 so the runs axis is
+populated and within-template variability is captured.
+
 Models (defaults):
     - OpenAI: gpt-4.1-nano
     - OpenRouter: google/gemini-2.0-flash-lite-001
@@ -121,6 +125,8 @@ TEMPLATES = {
 TEMPLATE_LABELS = list(TEMPLATES.keys())
 N_TEMPLATES = len(TEMPLATE_LABELS)
 N_INPUTS = len(INPUTS)
+N_RUNS = 3
+TEMPERATURE = 0.7
 
 
 # ---------------------------------------------------------------------------
@@ -226,32 +232,32 @@ def call_model(prompt: str, *, model: str, client: OpenAI) -> str:
     response = client.chat.completions.create(
         model=model,
         messages=[{"role": "user", "content": prompt}],
-        temperature=0.0,
+        temperature=TEMPERATURE,
         max_completion_tokens=128,
     )
     return response.choices[0].message.content.strip()
 
 
-def run_multi_model_benchmark(clients: dict[str, OpenAI]) -> tuple[np.ndarray, dict[str, list[list[str]]]]:
-    """Run all (model, template, input) calls and score each output.
+def run_multi_model_benchmark(clients: dict[str, OpenAI]) -> tuple[np.ndarray, dict[str, list[list[list[str]]]]]:
+    """Run all (model, template, input, run) calls and score each output.
 
     Returns
     -------
     scores : np.ndarray
-        Shape ``(N_models, N_templates, N_inputs, 1, N_evaluators)`` — the
-        unit runs axis (axis 3) matches the promptstats ``(P, N, M, R, K)``
+        Shape ``(N_models, N_templates, N_inputs, N_runs, N_evaluators)``
+        matching the promptstats ``(P, N, M, R, K)``
         convention.
-    outputs_by_model : dict[str, list[list[str]]]
-        Raw outputs keyed by model label, indexed [template_idx][input_idx].
+    outputs_by_model : dict[str, list[list[list[str]]]]
+        Raw outputs keyed by model label, indexed [run_idx][template_idx][input_idx].
     """
     n_models = len(MODEL_SPECS)
-    scores = np.zeros((n_models, N_TEMPLATES, N_INPUTS, 1, len(EVALUATORS)))
-    outputs_by_model: dict[str, list[list[str]]] = {
-        spec["label"]: [[""] * N_INPUTS for _ in range(N_TEMPLATES)]
+    scores = np.zeros((n_models, N_TEMPLATES, N_INPUTS, N_RUNS, len(EVALUATORS)))
+    outputs_by_model: dict[str, list[list[list[str]]]] = {
+        spec["label"]: [[[""] * N_INPUTS for _ in range(N_TEMPLATES)] for _ in range(N_RUNS)]
         for spec in MODEL_SPECS
     }
 
-    total = n_models * N_TEMPLATES * N_INPUTS
+    total = n_models * N_TEMPLATES * N_INPUTS * N_RUNS
     done = 0
 
     for m_idx, spec in enumerate(MODEL_SPECS):
@@ -260,24 +266,25 @@ def run_multi_model_benchmark(clients: dict[str, OpenAI]) -> tuple[np.ndarray, d
         model_name = spec["model"]
         client = clients[provider]
 
-        for t_idx, (t_name, template) in enumerate(TEMPLATES.items()):
-            for i_idx, (text, ground_truth) in enumerate(INPUTS):
-                prompt = template.format(text=text)
-                output = call_model(prompt, model=model_name, client=client)
-                outputs_by_model[model_label][t_idx][i_idx] = output
+        for r_idx in range(N_RUNS):
+            for t_idx, (t_name, template) in enumerate(TEMPLATES.items()):
+                for i_idx, (text, ground_truth) in enumerate(INPUTS):
+                    prompt = template.format(text=text)
+                    output = call_model(prompt, model=model_name, client=client)
+                    outputs_by_model[model_label][r_idx][t_idx][i_idx] = output
 
-                for e_idx, (_, evaluator) in enumerate(EVALUATORS):
-                    scores[m_idx, t_idx, i_idx, 0, e_idx] = evaluator(output, ground_truth)
+                    for e_idx, (_, evaluator) in enumerate(EVALUATORS):
+                        scores[m_idx, t_idx, i_idx, r_idx, e_idx] = evaluator(output, ground_truth)
 
-                done += 1
-                predicted = _extract_label(output) or "???"
-                correct = "✓" if predicted == ground_truth else "✗"
-                print(
-                    f"  [{done:3d}/{total}] {model_label[:28]:<28s} | "
-                    f"{t_name:<16s} | input {i_idx:02d} | "
-                    f"truth={ground_truth:<8s} pred={predicted:<8s} {correct} | "
-                    f"'{output[:35]}'"
-                )
+                    done += 1
+                    predicted = _extract_label(output) or "???"
+                    correct = "✓" if predicted == ground_truth else "✗"
+                    print(
+                        f"  [{done:3d}/{total}] {model_label[:28]:<28s} | "
+                        f"run {r_idx + 1}/{N_RUNS} | {t_name:<16s} | input {i_idx:02d} | "
+                        f"truth={ground_truth:<8s} pred={predicted:<8s} {correct} | "
+                        f"'{output[:35]}'"
+                    )
 
     return scores, outputs_by_model
 
@@ -289,8 +296,9 @@ def demo_compare_models() -> None:
     print(f"Models     : {', '.join(model_labels)}")
     print(f"Templates  : {N_TEMPLATES}  ({', '.join(TEMPLATE_LABELS)})")
     print(f"Inputs     : {N_INPUTS}")
+    print(f"Runs       : {N_RUNS}  (temperature={TEMPERATURE})")
     print(f"Evaluators : {len(EVALUATORS)}  ({', '.join(EVALUATOR_NAMES)})")
-    print(f"Total calls: {len(MODEL_SPECS) * N_TEMPLATES * N_INPUTS}\n")
+    print(f"Total calls: {len(MODEL_SPECS) * N_TEMPLATES * N_INPUTS * N_RUNS}\n")
 
     print("Running multi-model benchmark …")
     t0 = time.time()
@@ -298,8 +306,7 @@ def demo_compare_models() -> None:
     elapsed = time.time() - t0
     print(f"\nCompleted in {elapsed:.1f}s\n")
 
-    # raw_scores shape: (N_models, N_templates, N_inputs, 1, N_evaluators) —
-    # the unit runs axis is already in place from run_multi_model_benchmark.
+    # raw_scores shape: (N_models, N_templates, N_inputs, N_runs, N_evaluators)
     multi_result = bps.MultiModelBenchmark(
         scores=raw_scores,
         model_labels=model_labels,
@@ -311,7 +318,7 @@ def demo_compare_models() -> None:
     print(
         f"MultiModelBenchmark: {multi_result.n_models} models × "
         f"{multi_result.n_templates} templates × {multi_result.n_inputs} inputs × "
-        f"1 run × {len(EVALUATOR_NAMES)} evaluators\n"
+        f"{N_RUNS} runs × {len(EVALUATOR_NAMES)} evaluators\n"
     )
 
     print("=== analyze(..., evaluator_mode='aggregate') ===")
