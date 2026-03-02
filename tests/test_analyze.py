@@ -147,6 +147,51 @@ def test_analyze_multimodel_recovers_best_model_and_best_pair():
     )
 
 
+def test_analyze_multimodel_single_prompt_warns_and_runs():
+    rng = np.random.default_rng(2027)
+    n_models = 3
+    n_inputs = 180
+
+    model_labels = ["Model 1", "Model 2", "Model 3"]
+    prompt_labels = ["Prompt A"]
+    input_labels = [f"item_{i:03d}" for i in range(n_inputs)]
+
+    target_means = np.array([7.4, 8.2, 7.8])
+    target_scales = np.array([0.7, 0.6, 0.65])
+
+    scores = np.empty((n_models, 1, n_inputs), dtype=float)
+    for model_idx in range(n_models):
+        scores[model_idx, 0] = rng.normal(
+            loc=target_means[model_idx],
+            scale=target_scales[model_idx],
+            size=n_inputs,
+        )
+    scores = np.clip(scores, 0.0, 10.0)
+
+    result = ps.MultiModelBenchmark(
+        scores=scores,
+        model_labels=model_labels,
+        template_labels=prompt_labels,
+        input_labels=input_labels,
+    )
+
+    with pytest.warns(UserWarning, match="Single-prompt multi-model analysis is supported"):
+        analysis = ps.analyze(
+            result,
+            n_bootstrap=1200,
+            rng=np.random.default_rng(13),
+        )
+
+    assert isinstance(analysis, ps.MultiModelBundle)
+
+    # Best model should still be recovered from model-level ranking.
+    model_best_idx = int(np.argmax(analysis.model_level.rank_dist.p_best))
+    assert analysis.model_level.rank_dist.labels[model_best_idx] == "Model 2"
+
+    # With one prompt, the best pair should be (best model, that prompt).
+    assert analysis.best_pair == ("Model 2", "Prompt A")
+
+
 def test_analyze_seeded_multirun_populates_seed_variance_and_ordering():
     # Seeded benchmark: (templates, inputs, runs) with R >= 3
     # so analyze() should populate seed_variance.

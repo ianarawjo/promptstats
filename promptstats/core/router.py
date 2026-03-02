@@ -9,6 +9,7 @@ Supported shapes
 ----------------
 * models=1, prompts>1, input_vars=1, runs>=1, evaluators>=1  →  AnalysisBundle
 * models>1, prompts>1, input_vars=1, runs>=1, evaluators>=1  →  MultiModelBundle
+* models>1, prompts=1, input_vars=1, runs>=1, evaluators>=1  →  MultiModelBundle (warn)
 """
 
 from __future__ import annotations
@@ -558,6 +559,16 @@ def _detect_shape(
 def _validate_supported(shape: BenchmarkShape) -> None:
     """Raise if the shape is outside the currently supported pipelines."""
     if shape.n_prompts < 2:
+        if shape.n_models > 1 and shape.n_prompts == 1:
+            warnings.warn(
+                "Single-prompt multi-model analysis is supported, but per-model "
+                "within-prompt comparisons are degenerate (only one template per "
+                "model). Results are still computed for model-level and cross-model "
+                "comparisons.",
+                UserWarning,
+                stacklevel=3,
+            )
+            return
         raise ValueError(
             f"analyze() requires at least 2 prompt templates; got {shape.n_prompts}. "
             "Add more templates to enable comparative analysis."

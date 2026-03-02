@@ -18,8 +18,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Optional
 
 import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
 import numpy as np
+from matplotlib.lines import Line2D
 
 if TYPE_CHECKING:
     from matplotlib.figure import Figure
@@ -30,18 +30,18 @@ from promptstats.core.ranking import bootstrap_mean_advantage, MeanAdvantageResu
 
 # -- Color palette --
 _PALETTE = {
-    "spread_band": "#D6E4F0",       # light blue — intrinsic spread
-    "spread_edge": "#A3C1DA",       # medium blue — spread border
-    "ci_band": "#2B6E99",           # dark blue — CI band
-    "ci_edge": "#1A4A6B",           # darker blue — CI border
-    "point_pos": "#1A4A6B",         # dark blue — point when positive
-    "point_neg": "#8B4D5C",         # muted red — point when negative
-    "point_zero": "#666666",        # gray — point when CI spans zero
-    "zero_line": "#CCCCCC",         # light gray — zero reference
-    "sig_marker": "#2B8C3E",        # green — significance marker
-    "grid": "#F0F0F0",             # very light gray — grid
-    "text": "#333333",             # dark gray — labels
-    "text_secondary": "#777777",    # medium gray — secondary text
+    "spread_band": "#DCE8F5",       # soft blue — intrinsic spread
+    "spread_edge": "#B8CCE3",       # muted blue — spread edge
+    "ci_band": "#3A78A4",           # medium-dark blue — CI band
+    "ci_edge": "#2B5F85",           # darker blue — CI edge
+    "point_pos": "#1E5A85",         # deep blue — positive mean
+    "point_neg": "#A34A63",         # muted rose — negative mean
+    "point_zero": "#5C6470",        # cool gray — CI overlaps zero
+    "zero_line": "#D4D8DE",         # soft gray — zero reference
+    "grid": "#EEF1F4",              # very light gray — x grid
+    "row_alt": "#FAFBFC",           # alternating row background
+    "text": "#2D333B",              # dark slate — labels
+    "text_secondary": "#6B7280",    # muted gray — secondary text
 }
 
 
@@ -132,12 +132,17 @@ def plot_mean_advantage(
 
     y_positions = np.arange(n)
 
-    # Spread band height and CI band height
-    spread_height = 0.32
-    ci_height = 0.14
+    # Band thicknesses (line-based for a cleaner look)
+    spread_lw = 10
+    ci_lw = 5
 
     # Draw zero reference line
     ax.axvline(x=0, color=_PALETTE["zero_line"], linewidth=1.2, zorder=1)
+
+    # Subtle alternating rows to improve readability
+    for i, y in enumerate(y_positions):
+        if i % 2 == 1:
+            ax.axhspan(y - 0.5, y + 0.5, color=_PALETTE["row_alt"], zorder=0)
 
     for i, y in enumerate(y_positions):
         # Determine point color based on significance
@@ -149,39 +154,42 @@ def plot_mean_advantage(
             point_color = _PALETTE["point_zero"]
 
         # Outer band: intrinsic spread (10th-90th percentile)
-        spread_rect = mpatches.FancyBboxPatch(
-            (sp_lo[i], y - spread_height / 2),
-            sp_hi[i] - sp_lo[i],
-            spread_height,
-            boxstyle="round,pad=0.02",
-            facecolor=_PALETTE["spread_band"],
-            edgecolor=_PALETTE["spread_edge"],
-            linewidth=0.8,
+        ax.plot(
+            [sp_lo[i], sp_hi[i]],
+            [y, y],
+            color=_PALETTE["spread_band"],
+            linewidth=spread_lw,
+            solid_capstyle="round",
             zorder=2,
         )
-        ax.add_patch(spread_rect)
+        ax.plot(
+            [sp_lo[i], sp_hi[i]],
+            [y, y],
+            color=_PALETTE["spread_edge"],
+            linewidth=1.0,
+            solid_capstyle="round",
+            zorder=2.2,
+            alpha=0.9,
+        )
 
         # Inner band: bootstrap CI on the mean
-        ci_rect = mpatches.FancyBboxPatch(
-            (ci_lo[i], y - ci_height / 2),
-            ci_hi[i] - ci_lo[i],
-            ci_height,
-            boxstyle="round,pad=0.01",
-            facecolor=_PALETTE["ci_band"],
-            edgecolor=_PALETTE["ci_edge"],
-            linewidth=1.0,
+        ax.plot(
+            [ci_lo[i], ci_hi[i]],
+            [y, y],
+            color=_PALETTE["ci_band"],
+            linewidth=ci_lw,
+            solid_capstyle="round",
             zorder=3,
         )
-        ax.add_patch(ci_rect)
 
         # Center point: mean advantage
         ax.plot(
             means[i], y,
             "o",
-            color="white",
-            markeredgecolor=point_color,
-            markeredgewidth=1.5,
-            markersize=7,
+            color=point_color,
+            markeredgecolor="white",
+            markeredgewidth=1.0,
+            markersize=6.5,
             zorder=4,
         )
 
@@ -190,8 +198,8 @@ def plot_mean_advantage(
             ax.plot(
                 means[i], y,
                 "o",
-                color=point_color,
-                markersize=3.5,
+                color="white",
+                markersize=2.8,
                 zorder=5,
             )
 
@@ -207,8 +215,17 @@ def plot_mean_advantage(
         labelpad=8,
     )
 
+    # x-limits with breathing room
+    all_x = np.concatenate([sp_lo, sp_hi, ci_lo, ci_hi, means])
+    x_min, x_max = np.min(all_x), np.max(all_x)
+    if np.isclose(x_min, x_max):
+        pad = 0.1 if np.isclose(x_min, 0.0) else max(0.05 * abs(x_min), 0.1)
+    else:
+        pad = 0.08 * (x_max - x_min)
+    ax.set_xlim(x_min - pad, x_max + pad)
+
     # Grid
-    ax.xaxis.grid(True, color=_PALETTE["grid"], linewidth=0.5, zorder=0)
+    ax.xaxis.grid(True, color=_PALETTE["grid"], linewidth=0.8, zorder=0)
     ax.yaxis.grid(False)
 
     # Remove spines
@@ -238,20 +255,30 @@ def plot_mean_advantage(
 
     # Legend
     sp_lo_pct, sp_hi_pct = adv.spread_percentiles
-    ci_pct = int(round((1 - 2 * (1 - (adv.bootstrap_ci_high[0] is not None))) * 100))
-    # Infer CI from the fact that we used the ci parameter
     legend_handles = [
-        mpatches.Patch(
-            facecolor=_PALETTE["spread_band"],
-            edgecolor=_PALETTE["spread_edge"],
-            linewidth=0.8,
+        Line2D(
+            [0], [0],
+            color=_PALETTE["spread_band"],
+            linewidth=spread_lw,
+            solid_capstyle="round",
             label=f"Score spread ({sp_lo_pct}th–{sp_hi_pct}th pctl)",
         ),
-        mpatches.Patch(
-            facecolor=_PALETTE["ci_band"],
-            edgecolor=_PALETTE["ci_edge"],
-            linewidth=1.0,
+        Line2D(
+            [0], [0],
+            color=_PALETTE["ci_band"],
+            linewidth=ci_lw,
+            solid_capstyle="round",
             label=f"{int(ci * 100)}% CI on mean (bootstrap, n={adv.n_bootstrap:,})",
+        ),
+        Line2D(
+            [0], [0],
+            marker="o",
+            color="none",
+            markerfacecolor=_PALETTE["point_pos"],
+            markeredgecolor="white",
+            markeredgewidth=1.0,
+            markersize=6,
+            label="Mean advantage",
         ),
     ]
     ax.legend(
@@ -261,13 +288,13 @@ def plot_mean_advantage(
         frameon=True,
         facecolor="white",
         edgecolor=_PALETTE["grid"],
-        framealpha=0.9,
+        framealpha=0.95,
+        handlelength=2.5,
     )
 
     # Annotation explaining the two bands
     ax.annotate(
-        "wider light band = inconsistent template · "
-        "wider dark band = uncertain estimate",
+        "light band = template spread · dark band = uncertainty on mean",
         xy=(0.5, -0.02),
         xycoords="axes fraction",
         ha="center",
