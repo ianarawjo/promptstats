@@ -23,7 +23,7 @@ Relying purely on bar charts and averages can very, very easily lead to erroneou
 
 Why do people do evals this way? Well, they don't have the time, tools, or knowledge on how to do it better—frequently, they don't even know there's a better way. 
 
-`prompt-stats` aims to rectify this with simple, powerful defaults—just throw us your data and we'll run the stats and plot the results for you. Upstream applications, like LLM observability platforms, could take `promptstats` results and plot them in their own front-ends. Prompt optimization tools could also use `promptstats` to decide, e.g., when to cull a candidate prompt and how to present results to users. 
+`promptstats` aims to rectify this with simple, powerful defaults—just throw us your data and we'll run the stats and plot the results for you. Upstream applications, like LLM observability platforms, could take `promptstats` results and plot them in their own front-ends. Prompt optimization tools could also use `promptstats` to decide, e.g., when to cull a candidate prompt and how to present results to users. 
 
 ## Examples
 
