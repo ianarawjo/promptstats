@@ -10,6 +10,7 @@ Usage::
     promptstats analyze data.csv
     promptstats analyze data.xlsx --sheet "Results"
     promptstats analyze data.csv --ci 0.90 --n-bootstrap 5000
+    promptstats analyze data.csv --evaluator-mode per_evaluator
 """
 
 from __future__ import annotations
@@ -45,7 +46,7 @@ _ANALYZE_EPILOG = """\
 FILE FORMATS
 ------------
 
-Wide format  (rows = inputs, columns = templates):
+Wide format  (rows = inputs, columns = prompt templates):
 
     input,    Template A, Template B, Template C
     example_1,      0.85,       0.72,       0.91
@@ -53,39 +54,51 @@ Wide format  (rows = inputs, columns = templates):
 
   The first column contains input identifiers.  Each subsequent column is a
   prompt template.  All score values must be numeric.
+  Multiple evaluators are not supported in wide format.
 
 Long / tidy format  (one observation per row):
 
     Required columns (case-insensitive):
-      prompt    — prompt template name
-      input     — input identifier
-      score     — numeric score
+      prompt     — prompt template name
+      input      — input identifier
+      score      — numeric score
 
     Optional columns:
-      model     — model name  (enables multi-model analysis)
-      run       — run index   (adds run dimension; ≥3 runs per cell enables
-                               seed-variance / instability metrics)
+      evaluator  — evaluator name  (enables multi-evaluator analysis; use
+                   --evaluator-mode to control how evaluators are combined)
+      model      — model name      (enables multi-model analysis)
+      run        — run index       (adds run dimension; ≥3 runs per cell
+                                   enables seed-variance / instability metrics)
 
-    Example – single model, with runs:
+    Example – single model, one implicit evaluator, a single run:
 
-        prompt,         input, run, score
-        Template A, example_1,   0,  0.85
-        Template A, example_1,   1,  0.83
-        Template A, example_1,   2,  0.87
-        Template B, example_1,   0,  0.72
+        prompt,     input, score
+        Template A,  ex_1,  0.85
+        Template A,  ex_1,  0.91
+        Template B,  ex_1,  0.72
+        Template B,  ex_1,  0.88
+        ...
+
+    Example – single model, multiple evaluators, with multiple runs:
+
+        prompt,     input, run,  evaluator, score
+        Template A,  ex_1,   0,   accuracy,  0.85
+        Template A,  ex_1,   0,   fluency,   0.91
+        Template A,  ex_1,   1,   accuracy,  0.83
         ...
 
     Example – multi-model:
 
-        model,      prompt,     input, score
-        GPT-4,  Template A, example_1,  0.85
-        Claude, Template A, example_1,  0.90
+        model,  prompt,     input, score
+        GPT-4,  Template A,  ex_1,  0.85
+        Claude, Template A,  ex_1,  0.90
         ...
 
     Column name aliases (all case-insensitive):
       prompt    → template, prompt_template
       input     → example, item, id, input_label
       score     → value, result, metric
+      evaluator → eval, judge, criterion, metric_name
       model     → model_label, model_name
       run       → seed, repeat, run_id, trial
 """
@@ -127,6 +140,18 @@ def _build_parser() -> argparse.ArgumentParser:
         default="0",
         metavar="SHEET",
         help="Sheet name or 0-based index for XLSX files (default: 0).",
+    )
+    analyze.add_argument(
+        "--evaluator-mode",
+        choices=["aggregate", "per_evaluator"],
+        default="aggregate",
+        metavar="MODE",
+        help=(
+            "How to handle multiple evaluators: 'aggregate' (default) averages scores "
+            "across evaluators before analysis; 'per_evaluator' runs a separate full "
+            "analysis for each evaluator and prints each in turn.  "
+            "Only applies when an 'evaluator' column is present in the data."
+        ),
     )
     analyze.add_argument(
         "--ci",
@@ -219,31 +244,40 @@ def _cmd_analyze(args: argparse.Namespace) -> None:
 
     if isinstance(result, MultiModelBenchmark):
         runs_str = f" × {result.n_runs} runs" if result.n_runs > 1 else ""
+        evals_str = f" × {result.n_evaluators} evaluators" if result.n_evaluators > 1 else ""
         print(
             f"  MultiModelBenchmark: {result.n_models} models × "
-            f"{result.n_templates} prompts × {result.n_inputs} inputs{runs_str}"
+            f"{result.n_templates} prompts × {result.n_inputs} inputs{runs_str}{evals_str}"
         )
         print(f"  Models:    {result.model_labels}")
-        print(f"  Prompt templates: {result.template_labels}")
+        print(f"  Prompts:   {result.template_labels}")
+        if result.n_evaluators > 1:
+            print(f"  Evaluators: {result.evaluator_names}")
     else:
         runs_str = f" × {result.n_runs} runs" if result.n_runs > 1 else ""
+        evals_str = f" × {result.n_evaluators} evaluators" if result.n_evaluators > 1 else ""
         print(
             f"  BenchmarkResult: {result.n_templates} prompts × "
-            f"{result.n_inputs} inputs{runs_str}"
+            f"{result.n_inputs} inputs{runs_str}{evals_str}"
         )
-        print(f"  Prompt templates: {result.template_labels}")
+        print(f"  Prompts:   {result.template_labels}")
+        if result.n_evaluators > 1:
+            print(f"  Evaluators: {result.evaluator_names}")
+
+    # --- Validate --evaluator-mode ---
+    evaluator_mode = args.evaluator_mode
+    if evaluator_mode == "per_evaluator" and isinstance(result, MultiModelBenchmark):
+        _die(
+            "--evaluator-mode per_evaluator is not yet supported for multi-model "
+            "benchmarks.  Use --evaluator-mode aggregate instead."
+        )
 
     # --- Validate --reference ---
     if args.reference != "grand_mean":
-        all_labels = (
-            result.template_labels
-            if not isinstance(result, MultiModelBenchmark)
-            else result.template_labels
-        )
-        if args.reference not in all_labels:
+        if args.reference not in result.template_labels:
             _die(
-                f"--reference '{args.reference}' not found in template labels.\n"
-                f"  Available: {all_labels}"
+                f"--reference '{args.reference}' not found in prompt template labels.\n"
+                f"  Available: {result.template_labels}"
             )
 
     print()
@@ -255,6 +289,7 @@ def _cmd_analyze(args: argparse.Namespace) -> None:
     try:
         analysis = analyze(
             result,
+            evaluator_mode=evaluator_mode,
             ci=args.ci,
             n_bootstrap=args.n_bootstrap,
             correction=args.correction,
@@ -355,19 +390,28 @@ def _load_wide(df: pd.DataFrame):
 # ---------------------------------------------------------------------------
 
 def _load_long(df: pd.DataFrame):
-    """Parse a long/tidy-format DataFrame into a BenchmarkResult or MultiModelBenchmark."""
+    """Parse a long/tidy-format DataFrame into a BenchmarkResult or MultiModelBenchmark.
+
+    Detected columns drive the output shape:
+
+    * No evaluator col → 2-D ``(N, M)`` or 3-D ``(N, M, R)``
+    * Evaluator col, no run col → 4-D ``(N, M, 1, K)``
+    * Evaluator col + run col → 4-D ``(N, M, R, K)``
+    * Model col → MultiModelBenchmark, with extra P dimension prepended.
+    """
     from promptstats.core.types import BenchmarkResult, MultiModelBenchmark
 
-    template_col = _find_col(df, ["template", "prompt", "prompt_template"])
-    input_col    = _find_col(df, ["input", "example", "item", "id", "input_label"])
-    score_col    = _find_col(df, ["score", "value", "result", "metric"])
-    model_col    = _find_col(df, ["model", "model_label", "model_name"])
-    run_col      = _find_col(df, ["run", "seed", "repeat", "run_id", "trial"])
+    template_col  = _find_col(df, ["template", "prompt", "prompt_template"])
+    input_col     = _find_col(df, ["input", "example", "item", "id", "input_label"])
+    score_col     = _find_col(df, ["score", "value", "result", "metric"])
+    model_col     = _find_col(df, ["model", "model_label", "model_name"])
+    run_col       = _find_col(df, ["run", "seed", "repeat", "run_id", "trial"])
+    evaluator_col = _find_col(df, ["evaluator", "eval", "judge", "criterion", "metric_name"])
 
     if template_col is None:
         raise ValueError(
-            "Long format requires a 'template' column "
-            "(accepted names: template, prompt, prompt_template)."
+            "Long format requires a 'prompt' column "
+            "(accepted names: prompt, template, prompt_template)."
         )
     if input_col is None:
         raise ValueError(
@@ -383,52 +427,54 @@ def _load_long(df: pd.DataFrame):
     df = df.copy()
     df[score_col] = pd.to_numeric(df[score_col], errors="coerce")
 
-    # Preserve first-occurrence order for labels
-    template_labels = list(dict.fromkeys(str(v) for v in df[template_col]))
-    input_labels    = list(dict.fromkeys(str(v) for v in df[input_col]))
+    # Preserve first-occurrence order for all label dimensions.
+    template_labels  = list(dict.fromkeys(str(v) for v in df[template_col]))
+    input_labels     = list(dict.fromkeys(str(v) for v in df[input_col]))
     df[template_col] = df[template_col].astype(str)
     df[input_col]    = df[input_col].astype(str)
+
+    # Evaluator labels (preserved order, or None if no evaluator column).
+    if evaluator_col is not None:
+        df[evaluator_col]  = df[evaluator_col].astype(str)
+        evaluator_labels   = list(dict.fromkeys(str(v) for v in df[evaluator_col]))
+    else:
+        evaluator_labels = None
+
+    # Warn about too few runs for seed-variance analysis.
+    if run_col is not None:
+        n_runs = df[run_col].nunique()
+        if n_runs < 3:
+            import warnings
+            warnings.warn(
+                f"Only {n_runs} run(s) found. "
+                "Seed-variance analysis requires R ≥ 3 runs per cell.",
+                UserWarning,
+            )
 
     if model_col is not None:
         model_labels = list(dict.fromkeys(str(v) for v in df[model_col]))
         df[model_col] = df[model_col].astype(str)
         scores = _pivot_multi_model(
-            df, model_col, template_col, input_col, score_col, run_col,
-            model_labels, template_labels, input_labels,
+            df, model_col, template_col, input_col, score_col, run_col, evaluator_col,
+            model_labels, template_labels, input_labels, evaluator_labels,
         )
-        if scores.ndim == 4:
-            run_labels = _run_labels(df, run_col)
-            if len(run_labels) < 3:
-                import warnings
-                warnings.warn(
-                    f"Only {len(run_labels)} run(s) found. "
-                    "Seed-variance analysis requires R ≥ 3 runs per cell.",
-                    UserWarning,
-                )
         return MultiModelBenchmark(
             scores=scores,
             model_labels=model_labels,
             template_labels=template_labels,
             input_labels=input_labels,
+            evaluator_names=evaluator_labels or ["score"],
         )
     else:
         scores = _pivot_single_model(
-            df, template_col, input_col, score_col, run_col,
-            template_labels, input_labels,
+            df, template_col, input_col, score_col, run_col, evaluator_col,
+            template_labels, input_labels, evaluator_labels,
         )
-        if scores.ndim == 3:
-            run_labels = _run_labels(df, run_col)
-            if len(run_labels) < 3:
-                import warnings
-                warnings.warn(
-                    f"Only {len(run_labels)} run(s) found. "
-                    "Seed-variance analysis requires R ≥ 3 runs per cell.",
-                    UserWarning,
-                )
         return BenchmarkResult(
             scores=scores,
             template_labels=template_labels,
             input_labels=input_labels,
+            evaluator_names=evaluator_labels or ["score"],
         )
 
 
@@ -438,45 +484,91 @@ def _run_labels(df: pd.DataFrame, run_col: Optional[str]) -> list:
     return sorted(df[run_col].unique().tolist())
 
 
+# ---------------------------------------------------------------------------
+# Pivot helpers — single-model
+# ---------------------------------------------------------------------------
+
 def _pivot_single_model(
     df: pd.DataFrame,
     template_col: str,
     input_col: str,
     score_col: str,
     run_col: Optional[str],
+    evaluator_col: Optional[str],
     template_labels: list[str],
     input_labels: list[str],
+    evaluator_labels: Optional[list[str]],
 ) -> np.ndarray:
+    """Return scores shaped (N, M), (N, M, R), (N, M, 1, K), or (N, M, R, K)."""
     N, M = len(template_labels), len(input_labels)
     tpl_idx = {t: i for i, t in enumerate(template_labels)}
     inp_idx = {inp: j for j, inp in enumerate(input_labels)}
+    K = len(evaluator_labels) if evaluator_labels is not None else 0
 
-    if run_col is None:
-        # (N, M)
-        grp = df.groupby([template_col, input_col])[score_col].mean()
-        scores = np.full((N, M), np.nan)
-        for (tpl, inp), val in grp.items():
-            if tpl in tpl_idx and inp in inp_idx:
-                scores[tpl_idx[tpl], inp_idx[inp]] = val
-        _check_missing(scores, template_labels, input_labels)
-        return scores
+    if evaluator_labels is not None:
+        # --- 4-D paths ---
+        eval_idx = {e: k for k, e in enumerate(evaluator_labels)}
+
+        if run_col is not None:
+            # (N, M, R, K)
+            df = df.copy()
+            df[run_col] = df[run_col].astype(str)
+            run_labels = sorted(df[run_col].unique().tolist())
+            R = len(run_labels)
+            run_idx = {r: k for k, r in enumerate(run_labels)}
+            scores = np.full((N, M, R, K), np.nan)
+            grp = df.groupby(
+                [template_col, input_col, run_col, evaluator_col]
+            )[score_col].mean()
+            for (tpl, inp, run, ev), val in grp.items():
+                if tpl in tpl_idx and inp in inp_idx and run in run_idx and ev in eval_idx:
+                    scores[tpl_idx[tpl], inp_idx[inp], run_idx[run], eval_idx[ev]] = val
+            # Fill missing runs per evaluator; each slice is (N, M, R).
+            for k in range(K):
+                _fill_missing_runs(scores[:, :, :, k])
+            _check_missing(scores[:, :, 0, 0], template_labels, input_labels)
+            return scores
+        else:
+            # (N, M, 1, K)
+            scores = np.full((N, M, 1, K), np.nan)
+            grp = df.groupby([template_col, input_col, evaluator_col])[score_col].mean()
+            for (tpl, inp, ev), val in grp.items():
+                if tpl in tpl_idx and inp in inp_idx and ev in eval_idx:
+                    scores[tpl_idx[tpl], inp_idx[inp], 0, eval_idx[ev]] = val
+            _check_missing(scores[:, :, 0, 0], template_labels, input_labels)
+            return scores
+
     else:
-        # (N, M, R)
-        df = df.copy()
-        df[run_col] = df[run_col].astype(str)
-        run_labels = sorted(df[run_col].unique().tolist())
-        R = len(run_labels)
-        run_idx = {r: k for k, r in enumerate(run_labels)}
-        grp = df.groupby([template_col, input_col, run_col])[score_col].mean()
-        scores = np.full((N, M, R), np.nan)
-        for (tpl, inp, run), val in grp.items():
-            if tpl in tpl_idx and inp in inp_idx and run in run_idx:
-                scores[tpl_idx[tpl], inp_idx[inp], run_idx[run]] = val
-        # Fill missing runs with cell mean so BenchmarkResult validation passes
-        _fill_missing_runs(scores)
-        _check_missing(scores[:, :, 0], template_labels, input_labels)
-        return scores
+        # --- 2-D / 3-D paths (no evaluator column) ---
+        if run_col is None:
+            # (N, M)
+            grp = df.groupby([template_col, input_col])[score_col].mean()
+            scores = np.full((N, M), np.nan)
+            for (tpl, inp), val in grp.items():
+                if tpl in tpl_idx and inp in inp_idx:
+                    scores[tpl_idx[tpl], inp_idx[inp]] = val
+            _check_missing(scores, template_labels, input_labels)
+            return scores
+        else:
+            # (N, M, R)
+            df = df.copy()
+            df[run_col] = df[run_col].astype(str)
+            run_labels = sorted(df[run_col].unique().tolist())
+            R = len(run_labels)
+            run_idx = {r: k for k, r in enumerate(run_labels)}
+            grp = df.groupby([template_col, input_col, run_col])[score_col].mean()
+            scores = np.full((N, M, R), np.nan)
+            for (tpl, inp, run), val in grp.items():
+                if tpl in tpl_idx and inp in inp_idx and run in run_idx:
+                    scores[tpl_idx[tpl], inp_idx[inp], run_idx[run]] = val
+            _fill_missing_runs(scores)
+            _check_missing(scores[:, :, 0], template_labels, input_labels)
+            return scores
 
+
+# ---------------------------------------------------------------------------
+# Pivot helpers — multi-model
+# ---------------------------------------------------------------------------
 
 def _pivot_multi_model(
     df: pd.DataFrame,
@@ -485,41 +577,96 @@ def _pivot_multi_model(
     input_col: str,
     score_col: str,
     run_col: Optional[str],
+    evaluator_col: Optional[str],
     model_labels: list[str],
     template_labels: list[str],
     input_labels: list[str],
+    evaluator_labels: Optional[list[str]],
 ) -> np.ndarray:
+    """Return scores shaped (P,N,M), (P,N,M,R), (P,N,M,1,K), or (P,N,M,R,K)."""
     P, N, M = len(model_labels), len(template_labels), len(input_labels)
     model_idx = {m: p for p, m in enumerate(model_labels)}
     tpl_idx   = {t: i for i, t in enumerate(template_labels)}
     inp_idx   = {inp: j for j, inp in enumerate(input_labels)}
+    K = len(evaluator_labels) if evaluator_labels is not None else 0
 
-    if run_col is None:
-        # (P, N, M)
-        grp = df.groupby([model_col, template_col, input_col])[score_col].mean()
-        scores = np.full((P, N, M), np.nan)
-        for (mdl, tpl, inp), val in grp.items():
-            if mdl in model_idx and tpl in tpl_idx and inp in inp_idx:
-                scores[model_idx[mdl], tpl_idx[tpl], inp_idx[inp]] = val
-        for p, mdl in enumerate(model_labels):
-            _check_missing(scores[p], template_labels, input_labels, context=f"model '{mdl}'")
-        return scores
+    if evaluator_labels is not None:
+        # --- 5-D paths ---
+        eval_idx = {e: k for k, e in enumerate(evaluator_labels)}
+
+        if run_col is not None:
+            # (P, N, M, R, K)
+            df = df.copy()
+            df[run_col] = df[run_col].astype(str)
+            run_labels = sorted(df[run_col].unique().tolist())
+            R = len(run_labels)
+            run_idx = {r: k for k, r in enumerate(run_labels)}
+            scores = np.full((P, N, M, R, K), np.nan)
+            grp = df.groupby(
+                [model_col, template_col, input_col, run_col, evaluator_col]
+            )[score_col].mean()
+            for (mdl, tpl, inp, run, ev), val in grp.items():
+                if (mdl in model_idx and tpl in tpl_idx
+                        and inp in inp_idx and run in run_idx and ev in eval_idx):
+                    scores[
+                        model_idx[mdl], tpl_idx[tpl], inp_idx[inp], run_idx[run], eval_idx[ev]
+                    ] = val
+            # Fill missing runs: each (N, M, R) slice per (model, evaluator).
+            for p in range(P):
+                for k in range(K):
+                    _fill_missing_runs(scores[p, :, :, :, k])
+            for p, mdl in enumerate(model_labels):
+                _check_missing(
+                    scores[p, :, :, 0, 0], template_labels, input_labels,
+                    context=f"model '{mdl}'"
+                )
+            return scores
+        else:
+            # (P, N, M, 1, K)
+            scores = np.full((P, N, M, 1, K), np.nan)
+            grp = df.groupby(
+                [model_col, template_col, input_col, evaluator_col]
+            )[score_col].mean()
+            for (mdl, tpl, inp, ev), val in grp.items():
+                if mdl in model_idx and tpl in tpl_idx and inp in inp_idx and ev in eval_idx:
+                    scores[model_idx[mdl], tpl_idx[tpl], inp_idx[inp], 0, eval_idx[ev]] = val
+            for p, mdl in enumerate(model_labels):
+                _check_missing(
+                    scores[p, :, :, 0, 0], template_labels, input_labels,
+                    context=f"model '{mdl}'"
+                )
+            return scores
+
     else:
-        # (P, N, M, R)
-        df = df.copy()
-        df[run_col] = df[run_col].astype(str)
-        run_labels = sorted(df[run_col].unique().tolist())
-        R = len(run_labels)
-        run_idx = {r: k for k, r in enumerate(run_labels)}
-        grp = df.groupby([model_col, template_col, input_col, run_col])[score_col].mean()
-        scores = np.full((P, N, M, R), np.nan)
-        for (mdl, tpl, inp, run), val in grp.items():
-            if mdl in model_idx and tpl in tpl_idx and inp in inp_idx and run in run_idx:
-                scores[model_idx[mdl], tpl_idx[tpl], inp_idx[inp], run_idx[run]] = val
-        _fill_missing_runs(scores)
-        for p, mdl in enumerate(model_labels):
-            _check_missing(scores[p, :, :, 0], template_labels, input_labels, context=f"model '{mdl}'")
-        return scores
+        # --- 3-D / 4-D paths (no evaluator column) ---
+        if run_col is None:
+            # (P, N, M)
+            grp = df.groupby([model_col, template_col, input_col])[score_col].mean()
+            scores = np.full((P, N, M), np.nan)
+            for (mdl, tpl, inp), val in grp.items():
+                if mdl in model_idx and tpl in tpl_idx and inp in inp_idx:
+                    scores[model_idx[mdl], tpl_idx[tpl], inp_idx[inp]] = val
+            for p, mdl in enumerate(model_labels):
+                _check_missing(scores[p], template_labels, input_labels, context=f"model '{mdl}'")
+            return scores
+        else:
+            # (P, N, M, R)
+            df = df.copy()
+            df[run_col] = df[run_col].astype(str)
+            run_labels = sorted(df[run_col].unique().tolist())
+            R = len(run_labels)
+            run_idx = {r: k for k, r in enumerate(run_labels)}
+            grp = df.groupby([model_col, template_col, input_col, run_col])[score_col].mean()
+            scores = np.full((P, N, M, R), np.nan)
+            for (mdl, tpl, inp, run), val in grp.items():
+                if mdl in model_idx and tpl in tpl_idx and inp in inp_idx and run in run_idx:
+                    scores[model_idx[mdl], tpl_idx[tpl], inp_idx[inp], run_idx[run]] = val
+            _fill_missing_runs(scores)
+            for p, mdl in enumerate(model_labels):
+                _check_missing(
+                    scores[p, :, :, 0], template_labels, input_labels, context=f"model '{mdl}'"
+                )
+            return scores
 
 
 # ---------------------------------------------------------------------------
@@ -529,11 +676,12 @@ def _pivot_multi_model(
 def _fill_missing_runs(scores: np.ndarray) -> None:
     """Fill NaN run slots with the mean of available runs in the same cell.
 
-    Operates on the last axis (runs).  Modifies in place.  Cells where
-    *all* runs are NaN are left as NaN (caught later by _check_missing).
+    The run dimension must be the *last* axis.  Cells where all runs are NaN
+    are left as NaN (caught later by ``_check_missing``).  Modifies in place.
+
+    Callers with evaluator axes should pass per-evaluator slices so that this
+    invariant holds, e.g. ``_fill_missing_runs(scores[:, :, :, k])``.
     """
-    # scores may be (N, M, R) or (P, N, M, R)
-    # The run axis is always the last one.
     it = np.nditer(scores[..., 0], flags=["multi_index"])
     while not it.finished:
         idx = it.multi_index
@@ -560,9 +708,9 @@ def _check_missing(
                 missing.append(f"  ({tpl!r}, {inp!r})")
     ctx = f" [{context}]" if context else ""
     raise ValueError(
-        f"Incomplete design{ctx}: {len(missing)} missing (template, input) "
+        f"Incomplete design{ctx}: {len(missing)} missing (prompt, input) "
         f"combination(s).\n"
-        "All templates must be evaluated on all inputs.  Missing cells:\n"
+        "All prompts must be evaluated on all inputs.  Missing cells:\n"
         + "\n".join(missing[:10])
         + ("\n  ..." if len(missing) > 10 else "")
     )
