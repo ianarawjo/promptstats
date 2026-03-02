@@ -1,6 +1,6 @@
 [build-system]
 requires = ["setuptools>=68.0", "wheel"]
-build-backend = "setuptools.backends._legacy:_Backend"
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "promptstats"
@@ -19,8 +19,12 @@ dependencies = [
 [project.optional-dependencies]
 interactive = ["plotly>=5.0"]
 models = ["statsmodels>=0.14", "choix>=0.3"]
-all = ["plotly>=5.0", "statsmodels>=0.14", "choix>=0.3", "seaborn>=0.12"]
+xlsx = ["openpyxl>=3.0"]
+all = ["plotly>=5.0", "statsmodels>=0.14", "choix>=0.3", "seaborn>=0.12", "openpyxl>=3.0"]
 dev = ["pytest>=7.0", "pytest-cov"]
+
+[project.scripts]
+promptstats = "promptstats.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["promptstats*"]
