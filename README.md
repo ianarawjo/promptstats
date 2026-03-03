@@ -107,6 +107,12 @@ LLMs are stochastic at temperature>0. Will the performance stay similar, even up
 
 ## Optional: Complex statistical analysis with mixed effects models
 
+> [!IMPORTANT]
+> Mixed effects analysis is experimental, and currently offers only the advantage of gracefully 
+> dealing with missing data. In the future, we plan to add factor decomposition across multiple inputs.
+> We recommend only installing this if you absolutely need robustness to missing data (`NaN`). Keep 
+> in mind that missing data must be reasonably random (i.e., like sampling from a larger distribution).
+
 `promptstats` can support more complex analyses for:
 - Missing data in inputs (some score cells are `NaN`)
 - Factor decomposition when multiple input factors are present
