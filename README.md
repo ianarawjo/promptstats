@@ -24,7 +24,7 @@ Running `pstats.analyze()` and then `pstats.print_analysis_summary(analysis)` pr
 
 From this output, we can see that Minimal and Instructive are the most promising candidates, but it is statistically unclear which is better. We also see that Chain-of-thought gives the least consistent outputs across multiple runs for the same inputs, compared to the other methods. 
 
-You can also plot within notebook environments (although this feature is being actively built out over time). The `plot_mean_advantage` function produces a chart showing each template's mean score advantage over the grand mean, with dual uncertainty bands — the narrow dark band is the bootstrapped CI on the mean, and the wide light band is the 10th–90th percentile spread (template consistency):
+You can also plot within notebook environments (although this feature is being actively built out over time). The `plot_point_advantage` function produces a chart showing each template's mean score advantage over the grand mean, with dual uncertainty bands — the narrow dark band is the bootstrapped CI on the mean, and the wide light band is the 10th–90th percentile spread (template consistency):
 
 ![Mean advantage plot](docs/mean_advantage.png)
 
@@ -33,15 +33,15 @@ You can also plot within notebook environments (although this feature is being a
 The specific statistical tests the `promptstats.analyze()` method runs are:
 
 - **All pairwise prompt comparisons (paired by input)** via `all_pairwise(...)`:
-    - Computes mean difference, confidence interval, and p-value for every prompt template pair.
+    - Computes median or mean difference (median by default), confidence interval, and p-value for every prompt template pair.
     - Resampling method defaults to `method="auto"`:
         - **BCa bootstrap** for moderate-sized input counts (`15 <= M <= 200`)
         - **Percentile bootstrap** otherwise
     - Multiple-comparisons correction for p-values defaults to **Holm** (`correction="holm"`).
 
-- **Mean advantage vs reference** via `bootstrap_mean_advantage(...)`:
-    - Advantage of each prompt template vs `reference="grand_mean"` (or a chosen template).
-    - Reports both a bootstrap CI on the mean and a spread band (default 10th–90th percentile) to separate uncertainty from intrinsic variability.
+- **Median/mean advantage vs reference** via `bootstrap_point_advantage(...)`:
+    - Advantage of each prompt template vs `reference="grand_mean"` (or a chosen template), on either the median or mean (median by default). 
+    - Reports both a bootstrap CI on the median/mean and a spread band (default 10th–90th percentile) to separate uncertainty from intrinsic variability.
 
 - **Bootstrap rank distribution** via `bootstrap_ranks(...)`:
     - Estimates each prompt template’s `P(best)` and expected rank among the full list of prompt templates.
@@ -136,7 +136,7 @@ analysis = pstats.analyze(benchmark)
 To visualize mean advantage relative to the grand mean, with bootstrapped confidence intervals:
 
 ```python
-fig = pstats.plot_mean_advantage(result, reference="grand_mean")
+fig = pstats.plot_point_advantage(result, reference="grand_mean")
 fig.savefig("advantage.png", dpi=150, bbox_inches="tight")
 ```
 

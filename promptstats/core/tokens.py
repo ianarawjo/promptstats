@@ -306,8 +306,8 @@ def _compute_pareto_frontier(
             except KeyError:
                 continue
 
-            b_significantly_better = score_r.significant and score_r.mean_diff > 0
-            b_significantly_cheaper = token_r.significant and token_r.mean_diff < 0
+            b_significantly_better = score_r.significant and score_r.point_diff > 0
+            b_significantly_cheaper = token_r.significant and token_r.point_diff < 0
 
             if b_significantly_better and b_significantly_cheaper:
                 dominated_by_all[a].append(b)

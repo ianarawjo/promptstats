@@ -156,7 +156,7 @@ def _pairwise_mean_diffs(bundle: ps.AnalysisBundle) -> np.ndarray:
     diffs = []
     for i in range(len(labels)):
         for j in range(i + 1, len(labels)):
-            diffs.append(bundle.pairwise.get(labels[i], labels[j]).mean_diff)
+            diffs.append(bundle.pairwise.get(labels[i], labels[j]).point_diff)
     return np.asarray(diffs, dtype=float)
 
 
@@ -225,11 +225,11 @@ def test_lmm_result_shapes_match_benchmark():
     assert len(bundle.rank_dist.p_best) == N
     assert len(bundle.rank_dist.expected_ranks) == N
     assert bundle.rank_dist.rank_probs.shape == (N, N)
-    assert len(bundle.mean_advantage.mean_advantages) == N
-    assert len(bundle.mean_advantage.bootstrap_ci_low) == N
-    assert len(bundle.mean_advantage.bootstrap_ci_high) == N
-    assert len(bundle.mean_advantage.spread_low) == N
-    assert len(bundle.mean_advantage.spread_high) == N
+    assert len(bundle.point_advantage.point_advantages) == N
+    assert len(bundle.point_advantage.bootstrap_ci_low) == N
+    assert len(bundle.point_advantage.bootstrap_ci_high) == N
+    assert len(bundle.point_advantage.spread_low) == N
+    assert len(bundle.point_advantage.spread_high) == N
     assert len(bundle.robustness.mean) == N
 
 
@@ -250,7 +250,7 @@ def test_lmm_labels_preserved():
     bundle = analyze(result, method="lmm", n_bootstrap=200, rng=np.random.default_rng(41))
 
     assert bundle.rank_dist.labels == labels
-    assert bundle.mean_advantage.labels == labels
+    assert bundle.point_advantage.labels == labels
     assert bundle.robustness.labels == labels
     assert list(bundle.pairwise.labels) == labels
 
@@ -298,8 +298,8 @@ def test_bootstrap_and_lmm_are_similar_on_complete_data(
     )
 
     np.testing.assert_allclose(
-        bootstrap_bundle.mean_advantage.mean_advantages,
-        lmm_bundle.mean_advantage.mean_advantages,
+        bootstrap_bundle.point_advantage.point_advantages,
+        lmm_bundle.point_advantage.point_advantages,
         atol=0.10,
     )
     np.testing.assert_allclose(
@@ -353,7 +353,7 @@ def test_lmm_mean_advantages_sum_to_zero_for_grand_mean_reference():
         result, method="lmm", reference="grand_mean",
         n_bootstrap=300, rng=np.random.default_rng(51),
     )
-    total = float(bundle.mean_advantage.mean_advantages.sum())
+    total = float(bundle.point_advantage.point_advantages.sum())
     assert abs(total) < 1e-8, f"mean_advantages sum = {total:.2e}, expected 0"
 
 
@@ -373,7 +373,7 @@ def test_lmm_reference_template_has_zero_advantage():
         n_bootstrap=200, rng=np.random.default_rng(61),
     )
     ref_idx = labels.index("T1")
-    assert abs(float(bundle.mean_advantage.mean_advantages[ref_idx])) < 1e-8
+    assert abs(float(bundle.point_advantage.point_advantages[ref_idx])) < 1e-8
 
 
 def test_lmm_recovers_best_template():
@@ -412,7 +412,7 @@ def test_lmm_mean_advantage_sign_matches_effect_direction():
         result, method="lmm", reference="grand_mean",
         n_bootstrap=200, rng=np.random.default_rng(81),
     )
-    adv = bundle.mean_advantage.mean_advantages
+    adv = bundle.point_advantage.point_advantages
     # T0 best → positive advantage
     assert adv[0] > 0, f"T0 advantage {adv[0]:.4f} should be positive"
     # T2 worst → negative advantage
@@ -456,7 +456,7 @@ def test_lmm_n_bootstrap_zero_signals_wald():
     """n_bootstrap=0 on MeanAdvantageResult signals parametric Wald, not bootstrap."""
     result = _make_result(np.random.default_rng(120))
     bundle = analyze(result, method="lmm", n_bootstrap=200, rng=np.random.default_rng(121))
-    assert bundle.mean_advantage.n_bootstrap == 0, (
+    assert bundle.point_advantage.n_bootstrap == 0, (
         "LMM mean_advantage should carry n_bootstrap=0 to indicate Wald (not bootstrap) CIs"
     )
 
@@ -502,7 +502,7 @@ def test_lmm_nan_result_shapes_are_correct():
 
     N = n_templates
     assert len(bundle.rank_dist.p_best) == N
-    assert len(bundle.mean_advantage.mean_advantages) == N
+    assert len(bundle.point_advantage.point_advantages) == N
     assert len(bundle.robustness.mean) == N
     assert bundle.rank_dist.rank_probs.shape == (N, N)
 
@@ -518,7 +518,7 @@ def test_lmm_nan_advantages_sum_to_approx_zero():
     )
     # With missing data the LMM mean advantages are based on the fitted model,
     # which is not constrained to sum to exactly zero, but should be close.
-    total = float(bundle.mean_advantage.mean_advantages.sum())
+    total = float(bundle.point_advantage.point_advantages.sum())
     assert abs(total) < 0.5, (
         f"mean_advantages sum = {total:.4f} is too large; missing data may bias estimates"
     )
@@ -649,7 +649,7 @@ def test_lmm_with_seeded_scores_shapes():
     )
     bundle = analyze(result, method="lmm", n_bootstrap=200, rng=np.random.default_rng(411))
 
-    assert bundle.mean_advantage.per_input_advantages.shape == (N, M)
+    assert bundle.point_advantage.per_input_advantages.shape == (N, M)
     assert bundle.robustness.mean.shape == (N,)
     assert bundle.rank_dist.rank_probs.shape == (N, N)
 
@@ -687,10 +687,10 @@ def test_lmm_ci_bounds_are_ordered():
     """CI low should always be <= mean, and mean <= CI high, for all templates."""
     result = _make_result(np.random.default_rng(520), n_inputs=25)
     bundle = analyze(result, method="lmm", n_bootstrap=300, rng=np.random.default_rng(521))
-    ma = bundle.mean_advantage
+    ma = bundle.point_advantage
     for i, label in enumerate(ma.labels):
         lo = float(ma.bootstrap_ci_low[i])
-        mid = float(ma.mean_advantages[i])
+        mid = float(ma.point_advantages[i])
         hi = float(ma.bootstrap_ci_high[i])
         assert lo <= mid <= hi, (
             f"Template '{label}': CI low={lo:.4f} mean={mid:.4f} high={hi:.4f} "
@@ -702,7 +702,7 @@ def test_lmm_spread_bounds_are_ordered():
     """Spread low should always be <= spread high for all templates."""
     result = _make_result(np.random.default_rng(530), n_inputs=30)
     bundle = analyze(result, method="lmm", n_bootstrap=200, rng=np.random.default_rng(531))
-    ma = bundle.mean_advantage
+    ma = bundle.point_advantage
     for i, label in enumerate(ma.labels):
         lo = float(ma.spread_low[i])
         hi = float(ma.spread_high[i])

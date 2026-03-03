@@ -8,6 +8,13 @@ import numpy as np
 from scipy import stats
 
 
+def _stat(values: np.ndarray, statistic: Literal["mean", "median"]) -> float:
+    """Apply *statistic* to a 1-D array and return a Python float."""
+    if statistic == "median":
+        return float(np.median(values))
+    return float(np.mean(values))
+
+
 def resolve_resampling_method(
     method: Literal["bootstrap", "bca", "auto"],
     sample_size: int,
@@ -29,52 +36,82 @@ def bootstrap_means_1d(
     values: np.ndarray,
     n_bootstrap: int,
     rng: np.random.Generator,
+    statistic: Literal["mean", "median"] = "mean",
 ) -> np.ndarray:
-    """Generate bootstrap replicates of the sample mean for 1-D values."""
+    """Generate bootstrap replicates of the sample statistic for 1-D values.
+
+    Parameters
+    ----------
+    statistic : str
+        ``'mean'`` (default) or ``'median'``.
+    """
     m = len(values)
-    boot_means = np.empty(n_bootstrap)
-    for b in range(n_bootstrap):
-        idx = rng.choice(m, size=m, replace=True)
-        boot_means[b] = np.mean(values[idx])
-    return boot_means
+    boot_stats = np.empty(n_bootstrap)
+    if statistic == "median":
+        for b in range(n_bootstrap):
+            idx = rng.choice(m, size=m, replace=True)
+            boot_stats[b] = np.median(values[idx])
+    else:
+        for b in range(n_bootstrap):
+            idx = rng.choice(m, size=m, replace=True)
+            boot_stats[b] = np.mean(values[idx])
+    return boot_stats
 
 
 def bootstrap_ci_1d(
     values: np.ndarray,
-    observed_mean: float,
+    observed_stat: float,
     method: Literal["bootstrap", "bca"],
     n_bootstrap: int,
     alpha: float,
     rng: np.random.Generator,
+    statistic: Literal["mean", "median"] = "mean",
 ) -> tuple[float, float]:
-    """Bootstrap or BCa CI for the mean of a 1-D array."""
-    boot_means = bootstrap_means_1d(values, n_bootstrap, rng)
+    """Bootstrap or BCa CI for the chosen statistic of a 1-D array.
+
+    Parameters
+    ----------
+    statistic : str
+        ``'mean'`` (default) or ``'median'``.
+    """
+    boot_stats = bootstrap_means_1d(values, n_bootstrap, rng, statistic=statistic)
     if method == "bca":
-        return bca_interval_1d(values, observed_mean, boot_means, alpha)
+        return bca_interval_1d(values, observed_stat, boot_stats, alpha, statistic=statistic)
     return (
-        float(np.percentile(boot_means, 100 * alpha / 2)),
-        float(np.percentile(boot_means, 100 * (1 - alpha / 2))),
+        float(np.percentile(boot_stats, 100 * alpha / 2)),
+        float(np.percentile(boot_stats, 100 * (1 - alpha / 2))),
     )
 
 
 def bca_interval_1d(
     values: np.ndarray,
-    observed_mean: float,
-    boot_means: np.ndarray,
+    observed_stat: float,
+    boot_stats: np.ndarray,
     alpha: float,
+    statistic: Literal["mean", "median"] = "mean",
 ) -> tuple[float, float]:
-    """Compute BCa confidence interval for the mean of 1-D values."""
-    b = len(boot_means)
-    less_count = np.sum(boot_means < observed_mean)
+    """Compute BCa confidence interval for a statistic of 1-D values.
+
+    The jackknife acceleration estimate uses *statistic* for the
+    leave-one-out estimates, matching the bootstrap statistic being corrected.
+
+    Parameters
+    ----------
+    statistic : str
+        ``'mean'`` (default) or ``'median'``.
+    """
+    b = len(boot_stats)
+    less_count = np.sum(boot_stats < observed_stat)
     prop_less = (less_count + 0.5) / (b + 1)
     z0 = stats.norm.ppf(prop_less)
 
     m = len(values)
-    jackknife_means = np.empty(m)
+    jackknife_stats = np.empty(m)
     for i in range(m):
-        jackknife_means[i] = np.mean(np.delete(values, i))
-    jack_mean = np.mean(jackknife_means)
-    d = jack_mean - jackknife_means
+        jackknife_stats[i] = _stat(np.delete(values, i), statistic)
+    # The acceleration uses the mean of jackknife estimates (standard BCa formula).
+    jack_mean = np.mean(jackknife_stats)
+    d = jack_mean - jackknife_stats
     denom = 6.0 * (np.sum(d ** 2) ** 1.5)
     accel = float(np.sum(d ** 3) / denom) if denom > 0 else 0.0
 
@@ -92,8 +129,8 @@ def bca_interval_1d(
     p_low = adjusted_prob(z_alpha_low)
     p_high = adjusted_prob(z_alpha_high)
 
-    ci_low = float(np.percentile(boot_means, 100 * p_low))
-    ci_high = float(np.percentile(boot_means, 100 * p_high))
+    ci_low = float(np.percentile(boot_stats, 100 * p_low))
+    ci_high = float(np.percentile(boot_stats, 100 * p_high))
     return ci_low, ci_high
 
 
@@ -102,8 +139,9 @@ def bootstrap_diffs_nested(
     scores_b: np.ndarray,
     n_bootstrap: int,
     rng: np.random.Generator,
+    statistic: Literal["mean", "median"] = "mean",
 ) -> np.ndarray:
-    """Bootstrap replicates of ``mean(cell_mean_a − cell_mean_b)`` via
+    """Bootstrap replicates of ``statistic(cell_mean_a − cell_mean_b)`` via
     two-level (nested) resampling over inputs then runs.
 
     Both inputs must share the same shape ``(M, R)`` where M is the number
@@ -113,6 +151,10 @@ def bootstrap_diffs_nested(
     replacement; the inner level independently resamples R runs for each
     selected input.  This propagates both input-sampling uncertainty and
     within-cell seed variance into the resulting distribution.
+
+    The cell-level aggregation over R runs always uses the mean (collapsing
+    repeated runs to a stable cell estimate).  The *statistic* parameter
+    controls the across-inputs aggregation: ``'mean'`` or ``'median'``.
 
     The implementation is fully vectorised across bootstrap iterations.
 
@@ -124,12 +166,14 @@ def bootstrap_diffs_nested(
         Number of bootstrap replicates to generate.
     rng : np.random.Generator
         Random number generator.
+    statistic : str
+        Across-inputs aggregator: ``'mean'`` (default) or ``'median'``.
 
     Returns
     -------
     np.ndarray
-        Shape ``(n_bootstrap,)``.  Each entry is the mean paired cell-mean
-        difference for one bootstrap resample.
+        Shape ``(n_bootstrap,)``.  Each entry is the statistic of paired
+        cell-mean differences for one bootstrap resample.
     """
     M, R = scores_a.shape
 
@@ -153,9 +197,11 @@ def bootstrap_diffs_nested(
     resampled_a = sel_a[b_range, m_range, run_idx]               # (B, M, R)
     resampled_b = sel_b[b_range, m_range, run_idx]               # (B, M, R)
 
-    # Cell means and per-input paired differences.
+    # Cell means (always mean over R runs) and per-input paired differences.
     diffs = resampled_a.mean(axis=2) - resampled_b.mean(axis=2)  # (B, M)
-    return diffs.mean(axis=1)                                     # (B,)
+    if statistic == "median":
+        return np.median(diffs, axis=1)                          # (B,)
+    return diffs.mean(axis=1)                                    # (B,)
 
 
 def nested_resample_cell_means_once(

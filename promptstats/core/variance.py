@@ -30,6 +30,8 @@ class RobustnessResult:
         Template labels.
     mean : np.ndarray
         Mean score per template.
+    median: np.ndarray
+        Median score per template.
     std : np.ndarray
         Standard deviation per template (between-input, on cell means).
     cv : np.ndarray
@@ -48,6 +50,7 @@ class RobustnessResult:
 
     labels: list[str]
     mean: np.ndarray
+    median: np.ndarray
     std: np.ndarray
     cv: np.ndarray
     iqr: np.ndarray
@@ -63,6 +66,7 @@ class RobustnessResult:
         data = {
             "template": self.labels,
             "mean": self.mean,
+            "median": self.median,
             "std": self.std,
             "cv": self.cv,
             "iqr": self.iqr,
@@ -181,6 +185,7 @@ def robustness_metrics(
     n_templates, m_inputs = scores.shape
 
     mean = np.nanmean(scores, axis=1)
+    median = np.nanmedian(scores, axis=1)
     std = np.nanstd(scores, axis=1, ddof=1)
 
     with np.errstate(divide="ignore", invalid="ignore"):
@@ -212,6 +217,7 @@ def robustness_metrics(
     return RobustnessResult(
         labels=labels,
         mean=mean,
+        median=median,
         std=std,
         cv=cv,
         iqr=iqr,

@@ -770,7 +770,7 @@ def _write_outputs(
     ci: float,
 ) -> None:
     from promptstats.core.router import AnalysisBundle, MultiModelBundle
-    from promptstats.vis.advantage import plot_mean_advantage
+    from promptstats.vis.advantage import plot_point_advantage
 
     for raw in out_paths:
         out_path = Path(raw).expanduser().resolve()
@@ -798,7 +798,7 @@ def _write_outputs(
 
         if suffix == ".png":
             if isinstance(analysis, AnalysisBundle):
-                fig = plot_mean_advantage(
+                fig = plot_point_advantage(
                     analysis.benchmark,
                     reference=reference,
                     n_bootstrap=n_bootstrap,
@@ -808,7 +808,7 @@ def _write_outputs(
                 print(f"Wrote plot: {out_path}")
                 continue
             if isinstance(analysis, MultiModelBundle):
-                fig = plot_mean_advantage(
+                fig = plot_point_advantage(
                     analysis.model_level.benchmark,
                     reference="grand_mean",
                     n_bootstrap=n_bootstrap,
@@ -823,7 +823,7 @@ def _write_outputs(
                 for evaluator_name, evaluator_analysis in analysis.items():
                     target = base.with_name(f"{base.name}_{evaluator_name}").with_suffix(".png")
                     if isinstance(evaluator_analysis, MultiModelBundle):
-                        fig = plot_mean_advantage(
+                        fig = plot_point_advantage(
                             evaluator_analysis.model_level.benchmark,
                             reference="grand_mean",
                             n_bootstrap=n_bootstrap,
@@ -831,7 +831,7 @@ def _write_outputs(
                             title=f"Model-Level Mean Advantage ({evaluator_name})",
                         )
                     else:
-                        fig = plot_mean_advantage(
+                        fig = plot_point_advantage(
                             evaluator_analysis.benchmark,
                             reference=reference,
                             n_bootstrap=n_bootstrap,

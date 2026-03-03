@@ -2,7 +2,7 @@
 
 from promptstats.core.types import BenchmarkResult, MultiModelBenchmark
 from promptstats.core.paired import pairwise_differences, all_pairwise, vs_baseline
-from promptstats.core.ranking import bootstrap_ranks, bootstrap_mean_advantage
+from promptstats.core.ranking import bootstrap_ranks, bootstrap_point_advantage
 from promptstats.core.variance import (
     robustness_metrics,
     seed_variance_decomposition,
@@ -17,7 +17,7 @@ from promptstats.core.router import (
     MultiModelBundle,
     print_analysis_summary,
 )
-from promptstats.vis.advantage import plot_mean_advantage
+from promptstats.vis.advantage import plot_point_advantage
 from promptstats.io import from_dataframe, DataLoadReport
 
 __version__ = "0.1.0"
@@ -29,7 +29,7 @@ __all__ = [
     "all_pairwise",
     "vs_baseline",
     "bootstrap_ranks",
-    "bootstrap_mean_advantage",
+    "bootstrap_point_advantage",
     "robustness_metrics",
     "seed_variance_decomposition",
     "SeedVarianceResult",
@@ -41,7 +41,7 @@ __all__ = [
     "BenchmarkShape",
     "MultiModelBundle",
     "print_analysis_summary",
-    "plot_mean_advantage",
+    "plot_point_advantage",
     "from_dataframe",
     "DataLoadReport",
 ]

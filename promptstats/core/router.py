@@ -22,7 +22,7 @@ import numpy as np
 
 from .types import BenchmarkResult, MultiModelBenchmark
 from .paired import PairwiseMatrix, all_pairwise
-from .ranking import RankDistribution, MeanAdvantageResult, bootstrap_ranks, bootstrap_mean_advantage
+from .ranking import RankDistribution, PointAdvantageResult, bootstrap_ranks, bootstrap_point_advantage
 from .variance import RobustnessResult, SeedVarianceResult, robustness_metrics, seed_variance_decomposition
 from .tokens import TokenUsage, TokenAnalysisResult, analyze_tokens
 
@@ -86,7 +86,7 @@ class AnalysisBundle:
         Detected structural properties used for routing.
     pairwise : PairwiseMatrix
         All pairwise statistical comparisons between templates.
-    mean_advantage : MeanAdvantageResult
+    point_advantage : PointAdvantageResult
         Mean advantage of each template over a reference, with
         epistemic CI and intrinsic spread bands.
     robustness : RobustnessResult
@@ -101,7 +101,7 @@ class AnalysisBundle:
     benchmark: BenchmarkResult
     shape: BenchmarkShape
     pairwise: PairwiseMatrix
-    mean_advantage: MeanAdvantageResult
+    point_advantage: PointAdvantageResult
     robustness: RobustnessResult
     rank_dist: RankDistribution
     seed_variance: Optional[SeedVarianceResult] = None
@@ -177,6 +177,7 @@ def analyze(
     spread_percentiles: tuple[float, float] = (10, 90),
     failure_threshold: Optional[float] = None,
     rng: Optional[np.random.Generator] = None,
+    statistic: Literal["mean", "median"] = "median",
 ) -> AnalysisResult:
     """Run all standard analyses for a benchmark result.
 
@@ -203,8 +204,10 @@ def analyze(
         evaluator and returns a dict keyed by evaluator label.
         Not supported for MultiModelBenchmark.
     reference : str
-        Reference for mean advantage: ``'grand_mean'`` (default) or a
-        template label to compare all others against.
+        Reference for advantage: ``'grand_mean'`` (default) or a
+        template label to compare all others against.  When
+        ``statistic='median'`` the grand reference is the per-input
+        grand median rather than the mean.
     method : str
         Statistical method for CIs and p-values:
 
@@ -219,6 +222,7 @@ def analyze(
           Prefer this when M < ~15 (bootstrap unstable) or when an
           ICC decomposition is desired.  ``AnalysisBundle.lmm_info``
           is populated with variance components and the ICC.
+          Not compatible with ``statistic='median'``.
     ci : float
         Confidence level for intervals (default 0.95).
     n_bootstrap : int
@@ -229,13 +233,20 @@ def analyze(
         Multiple comparisons correction: ``'holm'`` (default),
         ``'bonferroni'``, ``'fdr_bh'``, or ``'none'``.
     spread_percentiles : tuple[float, float]
-        Percentiles for the intrinsic variance band in mean advantage
+        Percentiles for the intrinsic variance band in the advantage plot
         (default ``(10, 90)``).
     failure_threshold : float, optional
         If provided, computes the fraction of inputs scoring below this
         value in robustness metrics.
     rng : np.random.Generator, optional
         Random number generator for reproducibility.
+    statistic : str
+        Central-tendency statistic for point estimates and bootstrap
+        resampling: ``'median'`` (default) or ``'mean'``.  Median is
+        recommended for LLM score distributions, which are frequently
+        non-normal (bimodal, bounded, or heavy-tailed).  All bootstrap
+        CIs and p-values are computed using the same statistic.
+        Not compatible with ``method='lmm'``.
 
     Returns
     -------
@@ -246,7 +257,8 @@ def analyze(
     Raises
     ------
     ValueError
-        If the benchmark has fewer than 2 prompt templates.
+        If the benchmark has fewer than 2 prompt templates, or if
+        ``statistic='median'`` is combined with ``method='lmm'``.
     NotImplementedError
         If the benchmark shape is not yet supported.
     ImportError
@@ -254,6 +266,11 @@ def analyze(
     """
     if rng is None:
         rng = np.random.default_rng()
+
+    if statistic not in {"mean", "median"}:
+        raise ValueError(
+            f"Unknown statistic '{statistic}'. Expected 'mean' or 'median'."
+        )
 
     kwargs = dict(
         reference=reference,
@@ -264,6 +281,7 @@ def analyze(
         spread_percentiles=spread_percentiles,
         failure_threshold=failure_threshold,
         rng=rng,
+        statistic=statistic,
     )
 
     # ------------------------------------------------------------------
@@ -392,11 +410,23 @@ def _analyze_single(
     spread_percentiles: tuple[float, float],
     failure_threshold: Optional[float],
     rng: np.random.Generator,
+    statistic: Literal["mean", "median"],
 ) -> AnalysisBundle:
     # ------------------------------------------------------------------
     # LMM path — fit score ~ template + (1|input) via pymer4/lme4
     # ------------------------------------------------------------------
     if method == "lmm":
+        if statistic == "median":
+            warnings.warn(
+                "statistic='median' is not compatible with method='lmm' "
+                "(the LMM is a mean-based model). Falling back to "
+                "statistic='mean' for this analysis. Pass statistic='mean' "
+                "explicitly to silence this warning, or switch to "
+                "method='auto' to use median with the bootstrap.",
+                UserWarning,
+                stacklevel=2,
+            )
+            statistic = "mean"
         from .mixed_effects import lmm_analyze
         pairwise, mean_adv, rank_dist, robustness, seed_var, lmm_info = lmm_analyze(
             result,
@@ -412,7 +442,7 @@ def _analyze_single(
             benchmark=result,
             shape=shape,
             pairwise=pairwise,
-            mean_advantage=mean_adv,
+            point_advantage=mean_adv,
             robustness=robustness,
             rank_dist=rank_dist,
             seed_variance=seed_var,
@@ -440,13 +470,13 @@ def _analyze_single(
     pairwise = all_pairwise(
         run_scores, labels,
         method=method, ci=ci, n_bootstrap=n_bootstrap,
-        correction=correction, rng=rng,
+        correction=correction, rng=rng, statistic=statistic,
     )
-    mean_adv = bootstrap_mean_advantage(
+    mean_adv = bootstrap_point_advantage(
         run_scores, labels,
         reference=reference,
         method=method, ci=ci, n_bootstrap=n_bootstrap,
-        spread_percentiles=spread_percentiles, rng=rng,
+        spread_percentiles=spread_percentiles, rng=rng, statistic=statistic,
     )
     robustness = robustness_metrics(
         run_scores, labels,
@@ -454,7 +484,7 @@ def _analyze_single(
     )
     rank_dist = bootstrap_ranks(
         run_scores, labels,
-        n_bootstrap=n_bootstrap, rng=rng,
+        n_bootstrap=n_bootstrap, rng=rng, statistic=statistic,
     )
 
     seed_var = None
@@ -465,7 +495,7 @@ def _analyze_single(
         benchmark=result,
         shape=shape,
         pairwise=pairwise,
-        mean_advantage=mean_adv,
+        point_advantage=mean_adv,
         robustness=robustness,
         rank_dist=rank_dist,
         seed_variance=seed_var,
@@ -484,6 +514,7 @@ def _analyze_multi_model(
     spread_percentiles: tuple[float, float],
     failure_threshold: Optional[float],
     rng: np.random.Generator,
+    statistic: Literal["mean", "median"],
 ) -> MultiModelBundle:
     kwargs = dict(
         reference=reference,
@@ -494,6 +525,7 @@ def _analyze_multi_model(
         spread_percentiles=spread_percentiles,
         failure_threshold=failure_threshold,
         rng=rng,
+        statistic=statistic,
     )
 
     per_model: Dict[str, AnalysisBundle] = {}
@@ -826,9 +858,10 @@ def _print_bundle_summary(
         )
     print()
 
-    print(f"--- Mean Advantage (reference={bundle.mean_advantage.reference}) ---")
-    low_p, high_p = bundle.mean_advantage.spread_percentiles
-    ma = bundle.mean_advantage
+    stat_label = bundle.point_advantage.statistic.capitalize()
+    print(f"--- {stat_label} Advantage (reference={bundle.point_advantage.reference}) ---")
+    low_p, high_p = bundle.point_advantage.spread_percentiles
+    ma = bundle.point_advantage
     ma_max_abs = max(
         1e-12,
         float(
@@ -836,7 +869,7 @@ def _print_bundle_summary(
                 np.abs(
                     np.concatenate(
                         [
-                            ma.mean_advantages,
+                            ma.point_advantages,
                             ma.bootstrap_ci_low,
                             ma.bootstrap_ci_high,
                             ma.spread_low,
@@ -849,19 +882,19 @@ def _print_bundle_summary(
     )
     ma_low = -ma_max_abs
     ma_high = ma_max_abs
-    print(f"  axis: [{ma_low:+.3f}, {ma_high:+.3f}]  (· spread, ─ CI, ● mean, │ zero)  spread percentiles = ({low_p:g}, {high_p:g})")
+    print(f"  axis: [{ma_low:+.3f}, {ma_high:+.3f}]  (· spread, ─ CI, ● {stat_label.lower()}, │ zero)  spread percentiles = ({low_p:g}, {high_p:g})")
     print(
-        f"  {item_singular_title:<{template_col_width}s} {'Interval Plot':<{line_width}s} {'Mean':>8s} "
+        f"  {item_singular_title:<{template_col_width}s} {'Interval Plot':<{line_width}s} {stat_label:>8s} "
         f"{'CI Low':>9s} {'CI High':>9s} {'Spread Lo':>10s} {'Spread Hi':>10s}"
     )
-    for i, label in enumerate(bundle.mean_advantage.labels):
+    for i, label in enumerate(bundle.point_advantage.labels):
         template_label = _truncate_label(label, template_col_width)
         line = _ascii_interval_line(
-            mean=float(bundle.mean_advantage.mean_advantages[i]),
-            ci_low=float(bundle.mean_advantage.bootstrap_ci_low[i]),
-            ci_high=float(bundle.mean_advantage.bootstrap_ci_high[i]),
-            spread_low=float(bundle.mean_advantage.spread_low[i]),
-            spread_high=float(bundle.mean_advantage.spread_high[i]),
+            mean=float(bundle.point_advantage.point_advantages[i]),
+            ci_low=float(bundle.point_advantage.bootstrap_ci_low[i]),
+            ci_high=float(bundle.point_advantage.bootstrap_ci_high[i]),
+            spread_low=float(bundle.point_advantage.spread_low[i]),
+            spread_high=float(bundle.point_advantage.spread_high[i]),
             axis_low=ma_low,
             axis_high=ma_high,
             width=line_width,
@@ -869,18 +902,21 @@ def _print_bundle_summary(
         print(
             f"  {template_label:<{template_col_width}s} "
             f"{line:<{line_width}s} "
-            f"{bundle.mean_advantage.mean_advantages[i]:>+7.3f} "
-            f"{bundle.mean_advantage.bootstrap_ci_low[i]:>+8.3f} "
-            f"{bundle.mean_advantage.bootstrap_ci_high[i]:>+8.3f} "
-            f"{bundle.mean_advantage.spread_low[i]:>+9.3f} "
-            f"{bundle.mean_advantage.spread_high[i]:>+9.3f}"
+            f"{bundle.point_advantage.point_advantages[i]:>+7.3f} "
+            f"{bundle.point_advantage.bootstrap_ci_low[i]:>+8.3f} "
+            f"{bundle.point_advantage.bootstrap_ci_high[i]:>+8.3f} "
+            f"{bundle.point_advantage.spread_low[i]:>+9.3f} "
+            f"{bundle.point_advantage.spread_high[i]:>+9.3f}"
         )
     print()
 
-    print("--- Pairwise Comparisons (lowest p-value first) ---")
+    # Determine statistic label from the first result (all share the same statistic).
+    first_result = next(iter(bundle.pairwise.results.values()), None)
+    pair_stat_label = first_result.statistic.capitalize() if first_result else "Mean"
+    print(f"--- Pairwise Comparisons (lowest p-value first) ---")
     pair_results = sorted(
         bundle.pairwise.results.values(),
-        key=lambda r: (r.p_value, -abs(r.mean_diff)),
+        key=lambda r: (r.p_value, -abs(r.point_diff)),
     )
     max_pairs = max(0, min(top_pairwise, len(pair_results)))
     if max_pairs > 0:
@@ -888,11 +924,11 @@ def _print_bundle_summary(
             1e-12,
             max(
                 max(
-                    abs(float(result.mean_diff)),
+                    abs(float(result.point_diff)),
                     abs(float(result.ci_low)),
                     abs(float(result.ci_high)),
-                    abs(float(result.mean_diff - result.std_diff)),
-                    abs(float(result.mean_diff + result.std_diff)),
+                    abs(float(result.point_diff - result.std_diff)),
+                    abs(float(result.point_diff + result.std_diff)),
                 )
                 for result in pair_results[:max_pairs]
             ),
@@ -901,20 +937,20 @@ def _print_bundle_summary(
         pair_high = pair_max_abs
         print(
             f"  axis: [{pair_low:+.3f}, {pair_high:+.3f}]  "
-            "(· ±1σ, ─ CI, ● mean, │ zero)"
+            f"(· ±1σ, ─ CI, ● {pair_stat_label.lower()}, │ zero)"
         )
         print(
-            f"  {'Pair':<{pair_col_width}s} {'Interval Plot':<{line_width}s} {'Mean':>8s} "
+            f"  {'Pair':<{pair_col_width}s} {'Interval Plot':<{line_width}s} {pair_stat_label:>8s} "
             f"{'CI Low':>9s} {'CI High':>9s} {'σ':>8s} {'p':>9s} {'sig':>5s}"
         )
 
     for result in pair_results[:max_pairs]:
         line = _ascii_interval_line(
-            mean=float(result.mean_diff),
+            mean=float(result.point_diff),
             ci_low=float(result.ci_low),
             ci_high=float(result.ci_high),
-            spread_low=float(result.mean_diff - result.std_diff),
-            spread_high=float(result.mean_diff + result.std_diff),
+            spread_low=float(result.point_diff - result.std_diff),
+            spread_high=float(result.point_diff + result.std_diff),
             axis_low=pair_low,
             axis_high=pair_high,
             width=line_width,
@@ -926,7 +962,7 @@ def _print_bundle_summary(
         print(
             f"  {pair_label:<{pair_col_width}s} "
             f"{line:<{line_width}s} "
-            f"{result.mean_diff:+.4f} "
+            f"{result.point_diff:+.4f} "
             f"{result.ci_low:+.4f} "
             f"{result.ci_high:+.4f} "
             f"{result.std_diff:>7.4f} "
@@ -1094,7 +1130,7 @@ def _print_token_pareto_summary(
             # Marginal score gain (next − current).
             try:
                 sc_r = bundle.pairwise.get(next_lbl, lbl)
-                sc_diff_pp = sc_r.mean_diff * 100
+                sc_diff_pp = sc_r.point_diff * 100
                 sc_ci_lo_pp = sc_r.ci_low * 100
                 sc_ci_hi_pp = sc_r.ci_high * 100
                 sc_note = (
@@ -1110,7 +1146,7 @@ def _print_token_pareto_summary(
             # Marginal token cost (next − current).
             try:
                 tok_r = token_analysis.pairwise.get(next_lbl, lbl)
-                tok_diff = tok_r.mean_diff
+                tok_diff = tok_r.point_diff
                 tok_ci_lo = tok_r.ci_low
                 tok_ci_hi = tok_r.ci_high
                 tok_note = (

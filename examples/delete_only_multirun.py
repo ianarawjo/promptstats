@@ -406,7 +406,7 @@ def main():
         template_labels=TEMPLATE_LABELS,
         input_labels=INPUT_LABELS,
     )
-    fig = pstats.plot_mean_advantage(
+    fig = pstats.plot_point_advantage(
         result_2d,
         reference="grand_mean",
         title=(

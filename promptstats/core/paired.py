@@ -18,7 +18,7 @@ from typing import Literal, Optional
 
 import numpy as np
 
-from .resampling import bca_interval_1d, bootstrap_diffs_nested, bootstrap_means_1d, resolve_resampling_method
+from .resampling import bca_interval_1d, bootstrap_diffs_nested, bootstrap_means_1d, resolve_resampling_method, _stat
 from .stats_utils import correct_pvalues
 
 
@@ -28,7 +28,7 @@ class PairedDiffResult:
 
     template_a: str
     template_b: str
-    mean_diff: float
+    point_diff: float       # point estimate under the chosen statistic
     std_diff: float
     ci_low: float
     ci_high: float
@@ -37,6 +37,7 @@ class PairedDiffResult:
     n_inputs: int
     per_input_diffs: np.ndarray  # shape (M,) — per-input cell-mean differences
     n_runs: int = 1              # R used; 1 means no seed dimension
+    statistic: str = "mean"      # 'mean' or 'median'
 
     @property
     def significant(self) -> bool:
@@ -45,10 +46,10 @@ class PairedDiffResult:
 
     @property
     def effect_size(self) -> float:
-        """Cohen's d (paired): mean_diff / std_diff."""
+        """Paired effect size: point_diff / std_diff."""
         if self.std_diff == 0:
-            return float("inf") if self.mean_diff != 0 else 0.0
-        return self.mean_diff / self.std_diff
+            return float("inf") if self.point_diff != 0 else 0.0
+        return self.point_diff / self.std_diff
 
 
 @dataclass
@@ -69,7 +70,7 @@ class PairwiseMatrix:
             return PairedDiffResult(
                 template_a=a,
                 template_b=b,
-                mean_diff=-r.mean_diff,
+                point_diff=-r.point_diff,
                 std_diff=r.std_diff,
                 ci_low=-r.ci_high,
                 ci_high=-r.ci_low,
@@ -78,17 +79,18 @@ class PairwiseMatrix:
                 n_inputs=r.n_inputs,
                 per_input_diffs=-r.per_input_diffs,
                 n_runs=r.n_runs,
+                statistic=r.statistic,
             )
         raise KeyError(f"No comparison found for ({a}, {b})")
 
-    def mean_diff_matrix(self) -> np.ndarray:
-        """Return NxN matrix of mean differences."""
+    def point_diff_matrix(self) -> np.ndarray:
+        """Return NxN matrix of point-estimate differences (mean or median)."""
         n = len(self.labels)
         mat = np.zeros((n, n))
         for i, a in enumerate(self.labels):
             for j, b in enumerate(self.labels):
                 if i != j:
-                    mat[i, j] = self.get(a, b).mean_diff
+                    mat[i, j] = self.get(a, b).point_diff
         return mat
 
 
@@ -102,6 +104,7 @@ def pairwise_differences(
     ci: float = 0.95,
     n_bootstrap: int = 10_000,
     rng: Optional[np.random.Generator] = None,
+    statistic: Literal["mean", "median"] = "median",
 ) -> PairedDiffResult:
     """Compute paired differences between two templates.
 
@@ -125,6 +128,10 @@ def pairwise_differences(
         Number of bootstrap resamples.
     rng : np.random.Generator, optional
         Random number generator for reproducibility.
+    statistic : str
+        Point-estimate and bootstrap statistic: ``'median'`` (default) or
+        ``'mean'``.  Median is preferred for LLM score distributions, which
+        are frequently non-normal.
 
     Returns
     -------
@@ -142,6 +149,7 @@ def pairwise_differences(
             return _pairwise_diffs_seeded(
                 scores, idx_a, idx_b, label_a, label_b,
                 method=method, ci=ci, n_bootstrap=n_bootstrap, rng=rng,
+                statistic=statistic,
             )
         # R == 1 or R == 2: collapse to 2-D (warning already issued during validation)
         scores = scores.mean(axis=2)
@@ -151,33 +159,42 @@ def pairwise_differences(
     # ------------------------------------------------------------------ #
     diffs = scores[idx_a] - scores[idx_b]
     m = len(diffs)
-    mean_d = float(np.mean(diffs))
+    point_d = _stat(diffs, statistic)
     std_d = float(np.std(diffs, ddof=1))
     alpha = 1 - ci
 
     resolved_method = resolve_resampling_method(method, m)
 
     if resolved_method == "bootstrap":
-        centered_diffs = diffs - mean_d
-        boot_centered_means = np.empty(n_bootstrap)
-        for b in range(n_bootstrap):
-            idx = rng.choice(m, size=m, replace=True)
-            boot_centered_means[b] = np.mean(centered_diffs[idx])
-        boot_means = boot_centered_means + mean_d
-        ci_low = float(np.percentile(boot_means, 100 * alpha / 2))
-        ci_high = float(np.percentile(boot_means, 100 * (1 - alpha / 2)))
-        extreme_count = np.sum(np.abs(boot_centered_means) >= abs(mean_d))
+        centered_diffs = diffs - point_d
+        boot_centered_stats = np.empty(n_bootstrap)
+        if statistic == "median":
+            for b in range(n_bootstrap):
+                idx = rng.choice(m, size=m, replace=True)
+                boot_centered_stats[b] = np.median(centered_diffs[idx])
+        else:
+            for b in range(n_bootstrap):
+                idx = rng.choice(m, size=m, replace=True)
+                boot_centered_stats[b] = np.mean(centered_diffs[idx])
+        boot_stats = boot_centered_stats + point_d
+        ci_low = float(np.percentile(boot_stats, 100 * alpha / 2))
+        ci_high = float(np.percentile(boot_stats, 100 * (1 - alpha / 2)))
+        extreme_count = np.sum(np.abs(boot_centered_stats) >= abs(point_d))
         p_value = float((extreme_count + 1) / (n_bootstrap + 1))
         test_name = f"bootstrap (n={n_bootstrap})"
 
     elif resolved_method == "bca":
-        boot_means = bootstrap_means_1d(diffs, n_bootstrap=n_bootstrap, rng=rng)
-        ci_low, ci_high = bca_interval_1d(diffs, mean_d, boot_means, alpha)
-        centered_diffs = diffs - mean_d
-        boot_centered_means = bootstrap_means_1d(
-            centered_diffs, n_bootstrap=n_bootstrap, rng=rng,
+        boot_stats = bootstrap_means_1d(
+            diffs, n_bootstrap=n_bootstrap, rng=rng, statistic=statistic,
         )
-        extreme_count = np.sum(np.abs(boot_centered_means) >= abs(mean_d))
+        ci_low, ci_high = bca_interval_1d(
+            diffs, point_d, boot_stats, alpha, statistic=statistic,
+        )
+        centered_diffs = diffs - point_d
+        boot_centered_stats = bootstrap_means_1d(
+            centered_diffs, n_bootstrap=n_bootstrap, rng=rng, statistic=statistic,
+        )
+        extreme_count = np.sum(np.abs(boot_centered_stats) >= abs(point_d))
         p_value = float((extreme_count + 1) / (n_bootstrap + 1))
         test_name = f"bca bootstrap (n={n_bootstrap})"
 
@@ -190,7 +207,7 @@ def pairwise_differences(
     return PairedDiffResult(
         template_a=label_a,
         template_b=label_b,
-        mean_diff=mean_d,
+        point_diff=point_d,
         std_diff=std_d,
         ci_low=ci_low,
         ci_high=ci_high,
@@ -199,6 +216,7 @@ def pairwise_differences(
         n_inputs=m,
         per_input_diffs=diffs,
         n_runs=1,
+        statistic=statistic,
     )
 
 
@@ -213,6 +231,7 @@ def _pairwise_diffs_seeded(
     ci: float,
     n_bootstrap: int,
     rng: np.random.Generator,
+    statistic: Literal["mean", "median"],
 ) -> PairedDiffResult:
     """Seeded paired comparison using a two-level nested bootstrap.
 
@@ -228,34 +247,38 @@ def _pairwise_diffs_seeded(
     scores_a = scores[idx_a]   # (M, R)
     scores_b = scores[idx_b]   # (M, R)
 
-    # Point estimates from cell means.
+    # Point estimates from cell means (within-cell aggregation always uses mean).
     cell_means_a = scores_a.mean(axis=1)    # (M,)
     cell_means_b = scores_b.mean(axis=1)    # (M,)
     cell_diffs = cell_means_a - cell_means_b  # (M,)
 
-    mean_d = float(cell_diffs.mean())
+    point_d = _stat(cell_diffs, statistic)
     std_d = float(cell_diffs.std(ddof=1))
     alpha = 1 - ci
 
     resolved_method = resolve_resampling_method(method, M)
 
-    # Nested bootstrap replicates of the mean paired cell-mean difference.
-    boot_means = bootstrap_diffs_nested(scores_a, scores_b, n_bootstrap, rng)
+    # Nested bootstrap replicates of the statistic of paired cell-mean differences.
+    boot_stats = bootstrap_diffs_nested(
+        scores_a, scores_b, n_bootstrap, rng, statistic=statistic,
+    )
 
     if resolved_method == "bootstrap":
-        ci_low = float(np.percentile(boot_means, 100 * alpha / 2))
-        ci_high = float(np.percentile(boot_means, 100 * (1 - alpha / 2)))
-        # Null-centred: shift bootstrap distribution to have mean 0.
-        boot_centered = boot_means - mean_d
-        extreme_count = np.sum(np.abs(boot_centered) >= abs(mean_d))
+        ci_low = float(np.percentile(boot_stats, 100 * alpha / 2))
+        ci_high = float(np.percentile(boot_stats, 100 * (1 - alpha / 2)))
+        # Null-centred: shift bootstrap distribution to have statistic = 0.
+        boot_centered = boot_stats - point_d
+        extreme_count = np.sum(np.abs(boot_centered) >= abs(point_d))
         p_value = float((extreme_count + 1) / (n_bootstrap + 1))
         test_name = f"nested bootstrap (n={n_bootstrap}, R={R})"
 
     elif resolved_method == "bca":
         # BCa: jackknife over inputs (the outer sampling unit) using cell_diffs.
-        ci_low, ci_high = bca_interval_1d(cell_diffs, mean_d, boot_means, alpha)
-        boot_centered = boot_means - mean_d
-        extreme_count = np.sum(np.abs(boot_centered) >= abs(mean_d))
+        ci_low, ci_high = bca_interval_1d(
+            cell_diffs, point_d, boot_stats, alpha, statistic=statistic,
+        )
+        boot_centered = boot_stats - point_d
+        extreme_count = np.sum(np.abs(boot_centered) >= abs(point_d))
         p_value = float((extreme_count + 1) / (n_bootstrap + 1))
         test_name = f"nested bca bootstrap (n={n_bootstrap}, R={R})"
 
@@ -268,7 +291,7 @@ def _pairwise_diffs_seeded(
     return PairedDiffResult(
         template_a=label_a,
         template_b=label_b,
-        mean_diff=mean_d,
+        point_diff=point_d,
         std_diff=std_d,
         ci_low=ci_low,
         ci_high=ci_high,
@@ -277,6 +300,7 @@ def _pairwise_diffs_seeded(
         n_inputs=M,
         per_input_diffs=cell_diffs,
         n_runs=R,
+        statistic=statistic,
     )
 
 
@@ -288,6 +312,7 @@ def all_pairwise(
     n_bootstrap: int = 10_000,
     correction: Literal["holm", "bonferroni", "fdr_bh", "none"] = "holm",
     rng: Optional[np.random.Generator] = None,
+    statistic: Literal["mean", "median"] = "median",
 ) -> PairwiseMatrix:
     """Compute all pairwise comparisons with multiple comparisons correction.
 
@@ -309,6 +334,9 @@ def all_pairwise(
         ``'bonferroni'``, ``'fdr_bh'``, or ``'none'``.
     rng : np.random.Generator, optional
         Random number generator for reproducibility.
+    statistic : str
+        Point-estimate and bootstrap statistic: ``'median'`` (default) or
+        ``'mean'``.
 
     Returns
     -------
@@ -326,6 +354,7 @@ def all_pairwise(
             result = pairwise_differences(
                 scores, i, j, labels[i], labels[j],
                 method=method, ci=ci, n_bootstrap=n_bootstrap, rng=rng,
+                statistic=statistic,
             )
             results[(labels[i], labels[j])] = result
             pairs.append((labels[i], labels[j]))
@@ -339,7 +368,7 @@ def all_pairwise(
             results[pair] = PairedDiffResult(
                 template_a=r.template_a,
                 template_b=r.template_b,
-                mean_diff=r.mean_diff,
+                point_diff=r.point_diff,
                 std_diff=r.std_diff,
                 ci_low=r.ci_low,
                 ci_high=r.ci_high,
@@ -348,6 +377,7 @@ def all_pairwise(
                 n_inputs=r.n_inputs,
                 per_input_diffs=r.per_input_diffs,
                 n_runs=r.n_runs,
+                statistic=r.statistic,
             )
 
     return PairwiseMatrix(labels=labels, results=results, correction_method=correction)
@@ -362,6 +392,7 @@ def vs_baseline(
     n_bootstrap: int = 10_000,
     correction: Literal["holm", "bonferroni", "fdr_bh", "none"] = "holm",
     rng: Optional[np.random.Generator] = None,
+    statistic: Literal["mean", "median"] = "median",
 ) -> list[PairedDiffResult]:
     """Compare all templates against a designated baseline.
 
@@ -375,6 +406,9 @@ def vs_baseline(
         Label of the baseline template.
     method, ci, n_bootstrap, correction, rng :
         Same as ``all_pairwise``.
+    statistic : str
+        Point-estimate and bootstrap statistic: ``'median'`` (default) or
+        ``'mean'``.
 
     Returns
     -------
@@ -393,6 +427,7 @@ def vs_baseline(
         result = pairwise_differences(
             scores, i, baseline_idx, label, baseline,
             method=method, ci=ci, n_bootstrap=n_bootstrap, rng=rng,
+            statistic=statistic,
         )
         results.append(result)
 
@@ -404,7 +439,7 @@ def vs_baseline(
             PairedDiffResult(
                 template_a=r.template_a,
                 template_b=r.template_b,
-                mean_diff=r.mean_diff,
+                point_diff=r.point_diff,
                 std_diff=r.std_diff,
                 ci_low=r.ci_low,
                 ci_high=r.ci_high,
@@ -413,6 +448,7 @@ def vs_baseline(
                 n_inputs=r.n_inputs,
                 per_input_diffs=r.per_input_diffs,
                 n_runs=r.n_runs,
+                statistic=r.statistic,
             )
             for r, adj_p in zip(results, adjusted)
         ]

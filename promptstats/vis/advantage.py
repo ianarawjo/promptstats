@@ -25,7 +25,7 @@ if TYPE_CHECKING:
     from matplotlib.figure import Figure
 
 from promptstats.core.types import BenchmarkResult
-from promptstats.core.ranking import bootstrap_mean_advantage, MeanAdvantageResult
+from promptstats.core.ranking import bootstrap_point_advantage, PointAdvantageResult
 
 
 # -- Color palette --
@@ -45,36 +45,36 @@ _PALETTE = {
 }
 
 
-def plot_mean_advantage(
-    result: BenchmarkResult | MeanAdvantageResult,
+def plot_point_advantage(
+    result: BenchmarkResult | PointAdvantageResult,
     reference: str = "grand_mean",
     n_bootstrap: int = 10_000,
     ci: float = 0.95,
     spread_percentiles: tuple[float, float] = (10, 90),
-    sort_by: str = "mean",
+    sort_by: str = "advantage",
     figsize: Optional[tuple[float, float]] = None,
     title: Optional[str] = None,
     rng: Optional[np.random.Generator] = None,
 ) -> Figure:
-    """Plot mean advantage with dual uncertainty bands.
+    """Plot point advantage with dual uncertainty bands.
 
     Parameters
     ----------
-    result : BenchmarkResult or MeanAdvantageResult
+    result : BenchmarkResult or PointAdvantageResult
         Either raw benchmark data (will compute advantage internally) or
-        a pre-computed MeanAdvantageResult.
+        a pre-computed PointAdvantageResult.
     reference : str
         Reference for advantage computation. Either 'grand_mean' or a
-        template label. Ignored if result is already a MeanAdvantageResult.
+        template label. Ignored if result is already a PointAdvantageResult.
     n_bootstrap : int
-        Bootstrap iterations. Ignored if result is a MeanAdvantageResult.
+        Bootstrap iterations. Ignored if result is a PointAdvantageResult.
     ci : float
-        Confidence level. Ignored if result is a MeanAdvantageResult.
+        Confidence level. Ignored if result is a PointAdvantageResult.
     spread_percentiles : tuple[float, float]
         Percentiles for the spread band. Ignored if result is a
-        MeanAdvantageResult.
+        PointAdvantageResult.
     sort_by : str
-        Sort order: 'mean' (descending by mean advantage), 'label'
+        Sort order: 'advantage' (descending by point advantage), 'label'
         (alphabetical), or 'spread' (ascending by spread width).
     figsize : tuple[float, float], optional
         Figure size. Defaults to (10, 0.5 * N_templates + 1.5).
@@ -90,7 +90,7 @@ def plot_mean_advantage(
     # Compute advantage if given raw BenchmarkResult
     if isinstance(result, BenchmarkResult):
         scores = result.get_2d_scores()
-        adv = bootstrap_mean_advantage(
+        adv = bootstrap_point_advantage(
             scores=scores,
             labels=result.template_labels,
             reference=reference,
@@ -105,8 +105,8 @@ def plot_mean_advantage(
     n = len(adv.labels)
 
     # Sort
-    if sort_by == "mean":
-        order = np.argsort(-adv.mean_advantages)
+    if sort_by == "advantage":
+        order = np.argsort(-adv.point_advantages)
     elif sort_by == "label":
         order = np.argsort(adv.labels)
     elif sort_by == "spread":
@@ -116,7 +116,7 @@ def plot_mean_advantage(
         raise ValueError(f"Unknown sort_by: {sort_by}")
 
     labels = [adv.labels[i] for i in order]
-    means = adv.mean_advantages[order]
+    means = adv.point_advantages[order]
     ci_lo = adv.bootstrap_ci_low[order]
     ci_hi = adv.bootstrap_ci_high[order]
     sp_lo = adv.spread_low[order]

@@ -85,7 +85,7 @@ for i, label in enumerate(labels):
 print()
 
 # --- Mean advantage (the key computation for the plot) ---
-adv = pstats.bootstrap_mean_advantage(
+adv = pstats.bootstrap_point_advantage(
     scores, labels, reference="grand_mean", n_bootstrap=10_000, rng=rng,
 )
 print("=== Mean Advantage over Grand Mean ===")
@@ -93,7 +93,7 @@ print(f"{'Template':<25s} {'Mean':>7s} {'CI Low':>8s} {'CI High':>8s} {'Spread L
 for i in range(len(labels)):
     print(
         f"  {labels[i]:<23s} "
-        f"{adv.mean_advantages[i]:>+6.3f} "
+        f"{adv.point_advantages[i]:>+6.3f} "
         f"{adv.bootstrap_ci_low[i]:>+7.3f} "
         f"{adv.bootstrap_ci_high[i]:>+7.3f} "
         f"{adv.spread_low[i]:>+9.3f} "
@@ -102,18 +102,18 @@ for i in range(len(labels)):
 print()
 
 # --- Generate the plot ---
-fig = pstats.plot_mean_advantage(result, reference="grand_mean", rng=np.random.default_rng(42))
+fig = pstats.plot_point_advantage(result, reference="grand_mean", rng=np.random.default_rng(42))
 fig.savefig("mean_advantage_plot.png", dpi=150, bbox_inches="tight")
 print("Saved: mean_advantage_plot.png")
 
 # Also generate a version comparing against a specific baseline
-fig2 = pstats.plot_mean_advantage(
+fig2 = pstats.plot_point_advantage(
     result,
     reference="A: Reliable Winner",
-    title="Advantage over 'A: Reliable Winner'",
+    title="Mean Advantage over 'A: Reliable Winner'",
     rng=np.random.default_rng(42),
 )
-fig2.savefig("advantage_vs_baseline.png", dpi=150, bbox_inches="tight")
-print("Saved: advantage_vs_baseline.png")
+fig2.savefig("mean_advantage_vs_baseline.png", dpi=150, bbox_inches="tight")
+print("Saved: mean_advantage_vs_baseline.png")
 
 print("\nDone!")

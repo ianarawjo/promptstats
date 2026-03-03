@@ -80,7 +80,7 @@ import numpy as np
 import scipy.stats
 
 from .paired import PairedDiffResult, PairwiseMatrix
-from .ranking import MeanAdvantageResult, RankDistribution
+from .ranking import PointAdvantageResult, RankDistribution
 from .variance import RobustnessResult, SeedVarianceResult, robustness_metrics, seed_variance_decomposition
 from .stats_utils import correct_pvalues
 
@@ -354,7 +354,7 @@ def _lmm_to_pairwise(
         res = PairedDiffResult(
             template_a=label_a,
             template_b=label_b,
-            mean_diff=estimate,
+            point_diff=estimate,
             std_diff=std_diff,
             ci_low=ci_low,
             ci_high=ci_high,
@@ -363,6 +363,7 @@ def _lmm_to_pairwise(
             n_inputs=n_complete,
             per_input_diffs=per_input_diffs,
             n_runs=1,  # cell means are already run-averaged
+            statistic="mean",  # LMM is a mean-based model
         )
         results[(label_a, label_b)] = res
         pairs.append((label_a, label_b))
@@ -382,7 +383,7 @@ def _lmm_to_pairwise(
             results[pair] = PairedDiffResult(
                 template_a=r.template_a,
                 template_b=r.template_b,
-                mean_diff=r.mean_diff,
+                point_diff=r.point_diff,
                 std_diff=r.std_diff,
                 ci_low=r.ci_low,
                 ci_high=r.ci_high,
@@ -391,6 +392,7 @@ def _lmm_to_pairwise(
                 n_inputs=r.n_inputs,
                 per_input_diffs=r.per_input_diffs,
                 n_runs=r.n_runs,
+                statistic=r.statistic,
             )
 
     return PairwiseMatrix(labels=labels, results=results, correction_method=correction)
@@ -461,7 +463,7 @@ def _lmm_to_mean_advantage(
     ci: float,
     spread_percentiles: tuple[float, float],
     reference: str,
-) -> MeanAdvantageResult:
+) -> PointAdvantageResult:
     """Compute mean advantages from LMM fixed effects using the delta method.
 
     Point estimates are the fitted LMM marginal means (equal to raw cell-mean
@@ -525,9 +527,9 @@ def _lmm_to_mean_advantage(
     spread_low  = np.nanpercentile(raw_advantages, spread_percentiles[0], axis=1)
     spread_high = np.nanpercentile(raw_advantages, spread_percentiles[1], axis=1)
 
-    return MeanAdvantageResult(
+    return PointAdvantageResult(
         labels=labels,
-        mean_advantages=mean_advantages,
+        point_advantages=mean_advantages,
         bootstrap_ci_low=ci_low,
         bootstrap_ci_high=ci_high,
         spread_low=spread_low,
@@ -536,6 +538,7 @@ def _lmm_to_mean_advantage(
         per_input_advantages=raw_advantages,
         n_bootstrap=0,           # 0 = parametric Wald, not bootstrap
         spread_percentiles=spread_percentiles,
+        statistic="mean",        # LMM is a mean-based model
     )
 
 
@@ -680,7 +683,7 @@ def lmm_analyze(
     failure_threshold: Optional[float] = None,
     n_sim: int = 10_000,
     rng: Optional[np.random.Generator] = None,
-) -> tuple[PairwiseMatrix, MeanAdvantageResult, RankDistribution,
+) -> tuple[PairwiseMatrix, PointAdvantageResult, RankDistribution,
            RobustnessResult, Optional[SeedVarianceResult], LMMInfo]:
     """Run the full LMM analysis pipeline on a ``BenchmarkResult``.
 

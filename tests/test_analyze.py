@@ -65,7 +65,7 @@ def test_analyze_single_model_recovers_means_and_best_prompt():
     grand_mean_target = float(target_means.mean())
     expected_advantages = target_means - grand_mean_target
     np.testing.assert_allclose(
-        analysis.mean_advantage.mean_advantages,
+        analysis.point_advantage.point_advantages,
         expected_advantages,
         atol=0.20,
     )
@@ -456,8 +456,8 @@ def test_analyze_bca_and_bootstrap_are_consistent(n_inputs):
         atol=1e-12,
     )
     np.testing.assert_allclose(
-        analysis_bca.mean_advantage.mean_advantages,
-        analysis_bootstrap.mean_advantage.mean_advantages,
+        analysis_bca.point_advantage.point_advantages,
+        analysis_bootstrap.point_advantage.point_advantages,
         atol=1e-12,
     )
 
@@ -473,12 +473,12 @@ def test_analyze_bca_and_bootstrap_are_consistent(n_inputs):
 
     # BCa CI widths should be in a similar ballpark to percentile bootstrap.
     width_bootstrap = (
-        analysis_bootstrap.mean_advantage.bootstrap_ci_high
-        - analysis_bootstrap.mean_advantage.bootstrap_ci_low
+        analysis_bootstrap.point_advantage.bootstrap_ci_high
+        - analysis_bootstrap.point_advantage.bootstrap_ci_low
     )
     width_bca = (
-        analysis_bca.mean_advantage.bootstrap_ci_high
-        - analysis_bca.mean_advantage.bootstrap_ci_low
+        analysis_bca.point_advantage.bootstrap_ci_high
+        - analysis_bca.point_advantage.bootstrap_ci_low
     )
 
     # Avoid division-by-zero for degenerate cases (should be unlikely here).
@@ -494,12 +494,12 @@ def test_analyze_bca_and_bootstrap_are_consistent(n_inputs):
 
     # CI centers should also stay reasonably close.
     center_bootstrap = (
-        analysis_bootstrap.mean_advantage.bootstrap_ci_high
-        + analysis_bootstrap.mean_advantage.bootstrap_ci_low
+        analysis_bootstrap.point_advantage.bootstrap_ci_high
+        + analysis_bootstrap.point_advantage.bootstrap_ci_low
     ) / 2
     center_bca = (
-        analysis_bca.mean_advantage.bootstrap_ci_high
-        + analysis_bca.mean_advantage.bootstrap_ci_low
+        analysis_bca.point_advantage.bootstrap_ci_high
+        + analysis_bca.point_advantage.bootstrap_ci_low
     ) / 2
     center_atol = 0.18 if n_inputs <= 20 else 0.08
     np.testing.assert_allclose(center_bca, center_bootstrap, atol=center_atol)
@@ -655,3 +655,179 @@ def test_analyze_pathological_many_runs_detects_seed_noise_and_winner():
     most_noisy_idx = int(np.argmax(seed_var.instability))
     assert seed_var.labels[most_stable_idx] == "Winner Stable"
     assert seed_var.labels[most_noisy_idx] == "RunnerUp Noisy"
+
+
+# ---------------------------------------------------------------------------
+# statistic='median' correctness and divergence from mean
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("method", ["bootstrap", "bca"])
+def test_analyze_statistic_median_propagates_and_is_correct(method):
+    """statistic='median' is labelled on all result objects and produces point
+    estimates that match manual np.median computation exactly.
+
+    Both the bootstrap and BCa CI paths are exercised via parametrize.
+    """
+    rng = np.random.default_rng(555)
+    n_inputs = 80
+
+    prompt_labels = ["Prompt A", "Prompt B", "Prompt C"]
+    input_labels = [f"item_{i:03d}" for i in range(n_inputs)]
+
+    # Clipped-normal scores with a clear ordering: A > B > C.
+    target_medians = [7.5, 6.8, 6.1]
+    scores = np.vstack(
+        [
+            np.clip(rng.normal(loc=m, scale=0.9, size=n_inputs), 0.0, 10.0)
+            for m in target_medians
+        ]
+    )
+
+    result = ps.BenchmarkResult(
+        scores=scores,
+        template_labels=prompt_labels,
+        input_labels=input_labels,
+    )
+
+    analysis = ps.analyze(
+        result,
+        statistic="median",
+        method=method,
+        n_bootstrap=1500,
+        rng=np.random.default_rng(42),
+    )
+
+    assert isinstance(analysis, ps.AnalysisBundle)
+
+    # statistic label must propagate to all result objects.
+    assert analysis.point_advantage.statistic == "median"
+    for pair_result in analysis.pairwise.results.values():
+        assert pair_result.statistic == "median"
+
+    # Point advantages must match manual median computation exactly.
+    # Grand reference is always the per-input *mean* across templates (not
+    # median) to avoid degeneracy when the template count is odd.
+    grand_mean_per_input = scores.mean(axis=0)
+    advantages = scores - grand_mean_per_input[np.newaxis, :]
+    expected_point_advantages = np.median(advantages, axis=1)
+    np.testing.assert_allclose(
+        analysis.point_advantage.point_advantages,
+        expected_point_advantages,
+        atol=1e-10,
+    )
+
+    # Pairwise: point_diff for A vs B must equal median of per-input diffs.
+    ab_result = analysis.pairwise.get("Prompt A", "Prompt B")
+    expected_ab_diff = float(np.median(scores[0] - scores[1]))
+    np.testing.assert_allclose(ab_result.point_diff, expected_ab_diff, atol=1e-10)
+
+    # Confidence intervals must be finite and properly ordered.
+    assert np.all(np.isfinite(analysis.point_advantage.bootstrap_ci_low))
+    assert np.all(np.isfinite(analysis.point_advantage.bootstrap_ci_high))
+    assert np.all(
+        analysis.point_advantage.bootstrap_ci_low
+        <= analysis.point_advantage.bootstrap_ci_high
+    )
+
+    # The prompt with the highest median advantage should be Prompt A.
+    best_idx = int(np.argmax(analysis.point_advantage.point_advantages))
+    assert prompt_labels[best_idx] == "Prompt A"
+
+
+def test_analyze_median_and_mean_diverge_on_heavy_tailed_data():
+    """On LLM-style data with catastrophic-failure outliers, median and mean
+    give materially different—and opposite—conclusions about which prompt wins.
+
+    Design
+    ------
+    Prompt A  90% of inputs score ~6.5 (good output), 10% score ~0.0 (crash).
+              mean ≈ 5.85,  median ≈ 6.5
+
+    Prompt B  All inputs score ~6.0 (stable, never crashes).
+              mean ≈ 6.0,   median ≈ 6.0
+
+    Per-input differences  A − B:
+      ~90 % of diffs ≈  +0.5  (A is better on most inputs)
+      ~10 % of diffs ≈  −6.0  (catastrophic failures)
+
+    Mean statistic   The −6 outliers drag the average down → point_diff < 0 → B wins.
+    Median statistic The +0.5 majority dominates → point_diff ≈ +0.5 → A wins.
+
+    This pattern — occasional LLM failures that are invisible to the median but
+    dominate the mean — is the primary motivation for preferring median in
+    prompt benchmarking.
+    """
+    rng = np.random.default_rng(2024)
+    n_inputs = 300
+
+    prompt_labels = ["Prompt A", "Prompt B"]
+    input_labels = [f"item_{i:03d}" for i in range(n_inputs)]
+
+    # Prompt A: occasional catastrophic failures pull the mean far below median.
+    is_good = rng.random(n_inputs) < 0.90
+    scores_a = np.where(
+        is_good,
+        rng.normal(loc=6.5, scale=0.25, size=n_inputs),
+        rng.normal(loc=0.0, scale=0.25, size=n_inputs),
+    )
+    # Prompt B: stable performance, never crashes.
+    scores_b = rng.normal(loc=6.0, scale=0.25, size=n_inputs)
+
+    scores = np.clip(np.vstack([scores_a, scores_b]), 0.0, 10.0)
+
+    result = ps.BenchmarkResult(
+        scores=scores,
+        template_labels=prompt_labels,
+        input_labels=input_labels,
+    )
+
+    analysis_mean = ps.analyze(
+        result,
+        statistic="mean",
+        method="bootstrap",
+        n_bootstrap=2000,
+        rng=np.random.default_rng(7),
+    )
+    analysis_median = ps.analyze(
+        result,
+        statistic="median",
+        method="bootstrap",
+        n_bootstrap=2000,
+        rng=np.random.default_rng(7),
+    )
+
+    # Statistic labels round-trip correctly.
+    assert analysis_mean.point_advantage.statistic == "mean"
+    assert analysis_median.point_advantage.statistic == "median"
+
+    ab_mean = analysis_mean.pairwise.get("Prompt A", "Prompt B")
+    ab_median = analysis_median.pairwise.get("Prompt A", "Prompt B")
+
+    # Mean says B is better: A's failures drag its mean below B's.
+    assert ab_mean.point_diff < 0.0, (
+        f"Mean: expected A−B point_diff < 0 (B wins by mean), "
+        f"got {ab_mean.point_diff:.3f}"
+    )
+    # Median says A is better: 90 % of per-input diffs are ≈ +0.5.
+    assert ab_median.point_diff > 0.3, (
+        f"Median: expected A−B point_diff > 0.3 (A wins by median), "
+        f"got {ab_median.point_diff:.3f}"
+    )
+
+    # The two statistics must disagree substantially on A's point advantage.
+    adv_a_mean = float(analysis_mean.point_advantage.point_advantages[0])
+    adv_a_median = float(analysis_median.point_advantage.point_advantages[0])
+    # Advantage values are computed vs the grand-mean reference, which halves
+    # the raw per-input diff when N=2, so the threshold is correspondingly smaller.
+    assert abs(adv_a_median - adv_a_mean) > 0.20, (
+        f"Expected mean/median advantage of A to differ by > 0.20; "
+        f"got mean_adv={adv_a_mean:.3f}, median_adv={adv_a_median:.3f}"
+    )
+
+    # Median 95% CI for A-vs-B should be entirely positive: with 300 inputs,
+    # the bootstrap median will draw ≥ 150 positive diffs in every resample
+    # (only 10 % of diffs are negative), so the lower bound stays > 0.
+    assert ab_median.ci_low > 0.0, (
+        f"Median 95% CI lower bound should be positive (A > B is clear), "
+        f"got ci_low={ab_median.ci_low:.3f}"
+    )
