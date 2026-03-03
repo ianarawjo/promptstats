@@ -28,6 +28,32 @@ You can also plot within notebook environments (although this feature is being a
 
 ![Mean advantage plot](docs/mean_advantage.png)
 
+## Statistics
+
+The specific statistical tests the `promptstats.analyze()` method runs are:
+
+- **All pairwise prompt comparisons (paired by input)** via `all_pairwise(...)`:
+    - Computes mean difference, confidence interval, and p-value for every prompt template pair.
+    - Resampling method defaults to `method="auto"`:
+        - **BCa bootstrap** for moderate-sized input counts (`15 <= M <= 200`)
+        - **Percentile bootstrap** otherwise
+    - Multiple-comparisons correction for p-values defaults to **Holm** (`correction="holm"`).
+
+- **Mean advantage vs reference** via `bootstrap_mean_advantage(...)`:
+    - Advantage of each prompt template vs `reference="grand_mean"` (or a chosen template).
+    - Reports both a bootstrap CI on the mean and a spread band (default 10th–90th percentile) to separate uncertainty from intrinsic variability.
+
+- **Bootstrap rank distribution** via `bootstrap_ranks(...)`:
+    - Estimates each prompt template’s `P(best)` and expected rank among the full list of prompt templates.
+
+- **Robustness metrics** via `robustness_metrics(...)`:
+    - Per-prompt template mean, std, CV, IQR, CVaR-10, and key percentiles.
+    - Optional failure-rate metric when `failure_threshold` is provided.
+
+If your benchmark includes repeated runs (`R >= 3`), bootstrap-based analyses above use a **two-level nested bootstrap** (resample inputs, then runs within each input) so run-to-run stochasticity is propagated into CIs and rankings. In that case, `analyze()` also returns a seed/input variance decomposition via `seed_variance_decomposition(...)`.
+
+If you explicitly set `method="lmm"` (optional, requires `pymer4` + R), `analyze()` switches to a mixed-effects path (`score ~ template + (1|input)`) with Wald CIs and emmeans-based pairwise contrasts.
+
 ## Installation and Quick start CLI
 
 ```bash
@@ -52,19 +78,7 @@ From the command line, `promptstats` can read a CSV or Excel file directly and p
 promptstats analyze results.csv
 ```
 
-To save shareable artifacts in one pass:
-
-```bash
-promptstats analyze results.csv --out report.md report.json mean_advantage.png
-```
-
 The input file should have columns `template`, `input`, and `score` (run and evaluator columns are optional). Run `promptstats analyze --help` for the full list of options and supported column aliases.
-
-## Choose your path
-
-- **Fastest path (CLI):** You already have eval scores in CSV/XLSX and want a summary + exports quickly.
-- **Flexible path (Python API):** You want custom preprocessing, notebook workflows, or tighter integration into eval pipelines.
-- **Messy-data path (`from_dataframe`)**: You have duplicates, mixed score types, or partial runs and want explicit coercion/load reporting.
 
 For more complex statistical analysis with mixed effects models, see below for install instructions. R and pymer4 are required dependencies.
 
