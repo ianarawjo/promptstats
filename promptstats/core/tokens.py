@@ -273,17 +273,17 @@ def _compute_pareto_frontier(
     score_pairwise: PairwiseMatrix,
     token_pairwise: PairwiseMatrix,
 ) -> tuple[list[str], dict[str, list[str]]]:
-    """Identify Pareto-dominated templates using statistical significance.
+    """Identify Pareto-dominated templates using corrected p-values.
 
     Template *b* is considered to dominate template *a* only when **both**:
 
-    1. The score comparison (b vs a) is significant **and** b scores higher
-       (``mean_diff > 0`` after CI excludes zero).
-    2. The token comparison (b vs a) is significant **and** b uses fewer
-       tokens (``mean_diff < 0`` after CI excludes zero).
+     1. The score comparison (b vs a) has ``p_value < 0.05`` **and** b scores
+         higher (``mean_diff > 0``).
+     2. The token comparison (b vs a) has ``p_value < 0.05`` **and** b uses
+         fewer tokens (``mean_diff < 0``).
 
     This is intentionally conservative: templates remain on the frontier
-    whenever either comparison is non-significant.
+     whenever either comparison does not meet the p-value threshold.
 
     Returns
     -------
@@ -293,6 +293,7 @@ def _compute_pareto_frontier(
         Dominated templates mapped to their dominator(s).  Frontier
         templates do not appear as keys.
     """
+    pvalue_alpha = 0.05
     dominated_by_all: dict[str, list[str]] = {label: [] for label in labels}
 
     for a in labels:
@@ -306,8 +307,12 @@ def _compute_pareto_frontier(
             except KeyError:
                 continue
 
-            b_significantly_better = score_r.significant and score_r.point_diff > 0
-            b_significantly_cheaper = token_r.significant and token_r.point_diff < 0
+            b_significantly_better = (
+                score_r.p_value < pvalue_alpha and score_r.point_diff > 0
+            )
+            b_significantly_cheaper = (
+                token_r.p_value < pvalue_alpha and token_r.point_diff < 0
+            )
 
             if b_significantly_better and b_significantly_cheaper:
                 dominated_by_all[a].append(b)

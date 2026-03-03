@@ -33,11 +33,12 @@ You can also plot within notebook environments (although this feature is being a
 The specific statistical tests the `promptstats.analyze()` method runs are:
 
 - **All pairwise prompt comparisons (paired by input)** via `all_pairwise(...)`:
-    - Computes mean or median difference (mean by default), confidence interval, and p-value for every prompt template pair.
+    - Computes mean or median difference (mean by default), bootstrapped confidence interval, and p-value for every prompt template pair.
     - Resampling method defaults to `method="auto"`:
         - **BCa bootstrap** for moderate-sized input counts (`15 <= M <= 200`)
         - **Percentile bootstrap** otherwise
-    - Multiple-comparisons correction for p-values defaults to **Holm** (`correction="holm"`).
+    - Multiple-comparisons correction for p-values defaults to **Holm** (`correction="holm"`). 
+    - Also reports Wilcoxon signed-rank test p-value, in case you need it for people familiar with that test, although p-values from bootstrapped CIs are more robust
 
 - **Mean/median advantage vs reference** via `bootstrap_point_advantage(...)`:
     - Advantage of each prompt template vs `reference="grand_mean"` (or a chosen template), on either the mean or median (mean by default). 

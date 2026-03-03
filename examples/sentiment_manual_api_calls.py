@@ -349,7 +349,6 @@ def main():
         print(f"  95% CI:      [{diff.ci_low:+.4f}, {diff.ci_high:+.4f}]")
         print(f"  p-value:     {diff.p_value:.4f}")
         print(f"  Effect size: {diff.effect_size:.4f}")
-        print(f"  Significant: {diff.significant}")
         print()
 
     # -----------------------------------------------------------------------

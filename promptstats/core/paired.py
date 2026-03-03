@@ -22,6 +22,26 @@ from .resampling import bca_interval_1d, bootstrap_diffs_nested, bootstrap_means
 from .stats_utils import correct_pvalues
 
 
+def _wilcoxon_signed_rank_p(diffs: np.ndarray) -> Optional[float]:
+    """Two-sided Wilcoxon signed-rank p-value for per-input paired differences.
+
+    Uses ``zero_method='wilcox'`` (discards zero differences before ranking),
+    which is the most common convention.  Returns ``None`` if the test cannot
+    be computed (all differences are zero, or fewer than one non-zero pair).
+    """
+    from scipy.stats import wilcoxon  # scipy is a core dep; import here to keep top-level clean
+
+    if int(np.sum(diffs != 0)) < 1:
+        return None
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            result = wilcoxon(diffs, zero_method="wilcox", alternative="two-sided")
+        return float(result.pvalue)
+    except ValueError:
+        return None
+
+
 @dataclass
 class PairedDiffResult:
     """Result of a paired comparison between two templates."""
@@ -38,11 +58,7 @@ class PairedDiffResult:
     per_input_diffs: np.ndarray  # shape (M,) — per-input cell-mean differences
     n_runs: int = 1              # R used; 1 means no seed dimension
     statistic: str = "mean"      # 'mean' or 'median'
-
-    @property
-    def significant(self) -> bool:
-        """Whether the difference is significant (CI excludes zero)."""
-        return self.ci_low > 0 or self.ci_high < 0
+    wilcoxon_p: Optional[float] = None  # Wilcoxon signed-rank p-value (two-sided, on per_input_diffs)
 
     @property
     def effect_size(self) -> float:
@@ -80,6 +96,7 @@ class PairwiseMatrix:
                 per_input_diffs=-r.per_input_diffs,
                 n_runs=r.n_runs,
                 statistic=r.statistic,
+                wilcoxon_p=r.wilcoxon_p,  # two-sided, so p is the same when flipping direction
             )
         raise KeyError(f"No comparison found for ({a}, {b})")
 
@@ -204,6 +221,8 @@ def pairwise_differences(
     if method == "auto":
         test_name = f"auto→{test_name}"
 
+    wilcoxon_p = _wilcoxon_signed_rank_p(diffs)
+
     return PairedDiffResult(
         template_a=label_a,
         template_b=label_b,
@@ -217,6 +236,7 @@ def pairwise_differences(
         per_input_diffs=diffs,
         n_runs=1,
         statistic=statistic,
+        wilcoxon_p=wilcoxon_p,
     )
 
 
@@ -288,6 +308,8 @@ def _pairwise_diffs_seeded(
     if method == "auto":
         test_name = f"auto→{test_name}"
 
+    wilcoxon_p = _wilcoxon_signed_rank_p(cell_diffs)
+
     return PairedDiffResult(
         template_a=label_a,
         template_b=label_b,
@@ -301,6 +323,7 @@ def _pairwise_diffs_seeded(
         per_input_diffs=cell_diffs,
         n_runs=R,
         statistic=statistic,
+        wilcoxon_p=wilcoxon_p,
     )
 
 
@@ -359,12 +382,22 @@ def all_pairwise(
             results[(labels[i], labels[j])] = result
             pairs.append((labels[i], labels[j]))
 
-    # Apply multiple comparisons correction to p-values
+    # Apply multiple comparisons correction to bootstrap p-values (and Wilcoxon if available).
     if correction != "none" and len(pairs) > 1:
         p_values = np.array([results[p].p_value for p in pairs])
         adjusted = correct_pvalues(p_values, correction)
+
+        # Correct Wilcoxon p-values independently (only for pairs where the test ran).
+        wsr_pairs = [p for p in pairs if results[p].wilcoxon_p is not None]
+        if len(wsr_pairs) > 1:
+            wsr_pvals = np.array([results[p].wilcoxon_p for p in wsr_pairs], dtype=float)
+            wsr_adj_map = dict(zip(wsr_pairs, correct_pvalues(wsr_pvals, correction)))
+        else:
+            wsr_adj_map = {p: results[p].wilcoxon_p for p in wsr_pairs}
+
         for pair, adj_p in zip(pairs, adjusted):
             r = results[pair]
+            adj_wsr = wsr_adj_map.get(pair, r.wilcoxon_p)
             results[pair] = PairedDiffResult(
                 template_a=r.template_a,
                 template_b=r.template_b,
@@ -378,6 +411,7 @@ def all_pairwise(
                 per_input_diffs=r.per_input_diffs,
                 n_runs=r.n_runs,
                 statistic=r.statistic,
+                wilcoxon_p=float(adj_wsr) if adj_wsr is not None else None,
             )
 
     return PairwiseMatrix(labels=labels, results=results, correction_method=correction)
@@ -431,10 +465,25 @@ def vs_baseline(
         )
         results.append(result)
 
-    # Apply correction
+    # Apply correction to bootstrap p-values (and Wilcoxon if available).
     if correction != "none" and len(results) > 1:
         p_values = np.array([r.p_value for r in results])
         adjusted = correct_pvalues(p_values, correction)
+
+        # Correct Wilcoxon p-values independently.
+        wsr_results = [r for r in results if r.wilcoxon_p is not None]
+        if len(wsr_results) > 1:
+            wsr_pvals = np.array([r.wilcoxon_p for r in wsr_results], dtype=float)
+            wsr_adj_vals = correct_pvalues(wsr_pvals, correction)
+            wsr_adj_map = {
+                (r.template_a, r.template_b): float(v)
+                for r, v in zip(wsr_results, wsr_adj_vals)
+            }
+        else:
+            wsr_adj_map = {
+                (r.template_a, r.template_b): r.wilcoxon_p for r in wsr_results
+            }
+
         results = [
             PairedDiffResult(
                 template_a=r.template_a,
@@ -449,6 +498,7 @@ def vs_baseline(
                 per_input_diffs=r.per_input_diffs,
                 n_runs=r.n_runs,
                 statistic=r.statistic,
+                wilcoxon_p=wsr_adj_map.get((r.template_a, r.template_b), r.wilcoxon_p),
             )
             for r, adj_p in zip(results, adjusted)
         ]

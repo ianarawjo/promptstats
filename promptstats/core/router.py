@@ -840,6 +840,11 @@ def _print_bundle_summary(
 ) -> None:
     template_col_width = 24
     pair_col_width = 32
+    pair_stat_col_width = 8
+    pair_ci_col_width = 9
+    pair_sigma_col_width = 8
+    pair_p_boot_col_width = 10
+    pair_p_wsr_col_width = 9
 
     print("=== Analysis Summary ===")
     print(f"Shape: {bundle.shape}")
@@ -949,8 +954,11 @@ def _print_bundle_summary(
             f"(· ±1σ, ─ CI, ● {pair_stat_label.lower()}, │ zero)"
         )
         print(
-            f"  {'Pair':<{pair_col_width}s} {'Interval Plot':<{line_width}s} {pair_stat_label:>8s} "
-            f"{'CI Low':>9s} {'CI High':>9s} {'σ':>8s} {'p':>9s} {'sig':>5s}"
+            f"  {'Pair':<{pair_col_width}s} {'Interval Plot':<{line_width}s} "
+            f"{pair_stat_label:>{pair_stat_col_width}s} "
+            f"{'CI Low':>{pair_ci_col_width}s} {'CI High':>{pair_ci_col_width}s} "
+            f"{'σ':>{pair_sigma_col_width}s} "
+            f"{'p (boot)':>{pair_p_boot_col_width}s} {'p (wsr)':>{pair_p_wsr_col_width}s}"
         )
 
     for result in pair_results[:max_pairs]:
@@ -968,19 +976,25 @@ def _print_bundle_summary(
             f"{result.template_a} vs {result.template_b}",
             pair_col_width,
         )
+        p_boot_str = _format_p_value(result.p_value)
+        wsr_str = _format_p_value(result.wilcoxon_p)
         print(
             f"  {pair_label:<{pair_col_width}s} "
             f"{line:<{line_width}s} "
-            f"{result.point_diff:+.4f} "
-            f"{result.ci_low:+.4f} "
-            f"{result.ci_high:+.4f} "
-            f"{result.std_diff:>7.4f} "
-            f"{result.p_value:>9.4g} "
-            f"{str(result.significant):>5s}"
+            f"{result.point_diff:+{pair_stat_col_width}.4f} "
+            f"{result.ci_low:+{pair_ci_col_width}.4f} "
+            f"{result.ci_high:+{pair_ci_col_width}.4f} "
+            f"{result.std_diff:>{pair_sigma_col_width}.4f} "
+            f"{p_boot_str:>{pair_p_boot_col_width}s} "
+            f"{wsr_str:>{pair_p_wsr_col_width}s}"
         )
 
     if max_pairs == 0:
         print("  (no pairwise comparisons)")
+    elif max_pairs > 0:
+        print(f"  p (boot) = bootstrap {bundle.pairwise.correction_method}-corrected; "
+              f"p (wsr) = Wilcoxon signed-rank {bundle.pairwise.correction_method}-corrected")
+        print("  stars: * p<0.05, ** p<0.01, *** p<0.001")
     
     # Seed variance section (only when seeded data is present).
     if bundle.seed_variance is not None:
@@ -1142,11 +1156,7 @@ def _print_token_pareto_summary(
                 sc_diff_pp = sc_r.point_diff * 100
                 sc_ci_lo_pp = sc_r.ci_low * 100
                 sc_ci_hi_pp = sc_r.ci_high * 100
-                sc_note = (
-                    f", sig. p={sc_r.p_value:.3g}"
-                    if sc_r.significant
-                    else f", p={sc_r.p_value:.3g}"
-                )
+                sc_note = f", p={_format_p_value(sc_r.p_value)}"
             except KeyError:
                 sc_diff_pp = (float(score_means[j]) - float(score_means[i])) * 100
                 sc_ci_lo_pp = sc_ci_hi_pp = sc_diff_pp
@@ -1158,11 +1168,7 @@ def _print_token_pareto_summary(
                 tok_diff = tok_r.point_diff
                 tok_ci_lo = tok_r.ci_low
                 tok_ci_hi = tok_r.ci_high
-                tok_note = (
-                    f", sig. p={tok_r.p_value:.3g}"
-                    if tok_r.significant
-                    else f", p={tok_r.p_value:.3g}"
-                )
+                tok_note = f", p={_format_p_value(tok_r.p_value)}"
             except KeyError:
                 tok_diff = float(stats.mean_total[j]) - float(stats.mean_total[i])
                 tok_ci_lo = tok_ci_hi = tok_diff
@@ -1421,3 +1427,29 @@ def _truncate_label(text: str, width: int) -> str:
     if width <= 3:
         return text[:width]
     return text[: width - 1] + "…"
+
+
+def _p_value_stars(p_value: Optional[float]) -> str:
+    """Return significance stars for p-value thresholds.
+
+    Thresholds:
+    *   for p < 0.05
+    **  for p < 0.01
+    *** for p < 0.001
+    """
+    if p_value is None:
+        return ""
+    if p_value < 0.001:
+        return "***"
+    if p_value < 0.01:
+        return "**"
+    if p_value < 0.05:
+        return "*"
+    return ""
+
+
+def _format_p_value(p_value: Optional[float]) -> str:
+    """Format p-value with significance stars; return N/A for missing values."""
+    if p_value is None:
+        return "N/A"
+    return f"{p_value:.4g}{_p_value_stars(p_value)}"
