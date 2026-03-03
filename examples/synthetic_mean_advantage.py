@@ -69,7 +69,7 @@ diff_ac = pstats.pairwise_differences(
     scores, 0, 2, labels[0], labels[2], method="auto", rng=rng,
 )
 print(f"=== Pairwise: {diff_ac.template_a} vs {diff_ac.template_b} ===")
-print(f"  Mean diff: {diff_ac.mean_diff:+.3f}")
+print(f"  Mean diff: {diff_ac.point_diff:+.3f}")
 print(f"  95% CI:    [{diff_ac.ci_low:+.3f}, {diff_ac.ci_high:+.3f}]")
 print(f"  p-value:   {diff_ac.p_value:.4f}")
 print(f"  Effect size (Cohen's d): {diff_ac.effect_size:.3f}")

@@ -33,15 +33,15 @@ You can also plot within notebook environments (although this feature is being a
 The specific statistical tests the `promptstats.analyze()` method runs are:
 
 - **All pairwise prompt comparisons (paired by input)** via `all_pairwise(...)`:
-    - Computes median or mean difference (median by default), confidence interval, and p-value for every prompt template pair.
+    - Computes mean or median difference (mean by default), confidence interval, and p-value for every prompt template pair.
     - Resampling method defaults to `method="auto"`:
         - **BCa bootstrap** for moderate-sized input counts (`15 <= M <= 200`)
         - **Percentile bootstrap** otherwise
     - Multiple-comparisons correction for p-values defaults to **Holm** (`correction="holm"`).
 
-- **Median/mean advantage vs reference** via `bootstrap_point_advantage(...)`:
-    - Advantage of each prompt template vs `reference="grand_mean"` (or a chosen template), on either the median or mean (median by default). 
-    - Reports both a bootstrap CI on the median/mean and a spread band (default 10th–90th percentile) to separate uncertainty from intrinsic variability.
+- **Mean/median advantage vs reference** via `bootstrap_point_advantage(...)`:
+    - Advantage of each prompt template vs `reference="grand_mean"` (or a chosen template), on either the mean or median (mean by default). 
+    - Reports both a bootstrap CI on the mean/median and a spread band (default 10th–90th percentile) to separate uncertainty from intrinsic variability.
 
 - **Bootstrap rank distribution** via `bootstrap_ranks(...)`:
     - Estimates each prompt template’s `P(best)` and expected rank among the full list of prompt templates.
@@ -246,7 +246,6 @@ Installation details may differ on your system.
 ## Future
 
 We aim to continue to contribute to `promptstats`. Ideas for future features:
-- Operate over the median rather than the mean by default, as LLMs provide non-parametric outputs, and allow the user to pick one or the other
 - Add support for Wilcoxon signed-rank test output as additional reported statistics, for complete data
 - Mixed-effects models (LMMs and potentially GLMMs) for multi-input data. Currently, `promptstats` only supports the case of one input per prompt template, rather than a grid search (cross product) of different prompt variations.
 - A default "report" mode that outputs a PDF summarizing findings and diving into the details

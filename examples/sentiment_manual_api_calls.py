@@ -345,7 +345,7 @@ def main():
             method="bootstrap", rng=rng,
         )
         print(f"=== Pairwise: '{diff.template_a}' vs '{diff.template_b}' ===")
-        print(f"  Mean diff:   {diff.mean_diff:+.4f}")
+        print(f"  Mean diff:   {diff.point_diff:+.4f}")
         print(f"  95% CI:      [{diff.ci_low:+.4f}, {diff.ci_high:+.4f}]")
         print(f"  p-value:     {diff.p_value:.4f}")
         print(f"  Effect size: {diff.effect_size:.4f}")

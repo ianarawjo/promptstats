@@ -177,7 +177,7 @@ def analyze(
     spread_percentiles: tuple[float, float] = (10, 90),
     failure_threshold: Optional[float] = None,
     rng: Optional[np.random.Generator] = None,
-    statistic: Literal["mean", "median"] = "median",
+    statistic: Literal["mean", "median"] = "mean",
 ) -> AnalysisResult:
     """Run all standard analyses for a benchmark result.
 
@@ -205,9 +205,11 @@ def analyze(
         Not supported for MultiModelBenchmark.
     reference : str
         Reference for advantage: ``'grand_mean'`` (default) or a
-        template label to compare all others against.  When
-        ``statistic='median'`` the grand reference is the per-input
-        grand median rather than the mean.
+        template label to compare all others against.  The grand
+        reference is always the per-input mean across templates
+        regardless of ``statistic``; using the per-input median would
+        make the middle-ranked template's advantages identically zero
+        (degeneracy when N is odd).
     method : str
         Statistical method for CIs and p-values:
 
@@ -242,11 +244,18 @@ def analyze(
         Random number generator for reproducibility.
     statistic : str
         Central-tendency statistic for point estimates and bootstrap
-        resampling: ``'median'`` (default) or ``'mean'``.  Median is
-        recommended for LLM score distributions, which are frequently
-        non-normal (bimodal, bounded, or heavy-tailed).  All bootstrap
-        CIs and p-values are computed using the same statistic.
-        Not compatible with ``method='lmm'``.
+        resampling: ``'mean'`` (default) or ``'median'``.  Mean works
+        well for the majority of LLM benchmarks, including bounded and
+        semi-discrete scoring rubrics (pass/fail, BERTScore, ROUGE),
+        where the bootstrap already handles non-normality.  Use
+        ``'median'`` when scores follow a genuinely continuous,
+        heavy-tailed distribution where the median better represents
+        typical performance than the mean; note that median will produce
+        uninformative zero-width CIs whenever more than half of the
+        per-input score differences between two templates are identical
+        (common with clustered or ceiling-bounded scores).  All
+        bootstrap CIs and p-values are computed using the same
+        statistic.  Not compatible with ``method='lmm'``.
 
     Returns
     -------
