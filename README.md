@@ -14,6 +14,8 @@ The idea is simple: you give `promptstats` your benchmark data, and it runs stat
 - Plots and tests comparing model performance across prompt variations
 - Constraints that guide you into performing best practices, like always considering prompt sensitivity when benchmarking model performance
 
+**How does this differ from ChainForge?** I aim to integrate `promptstats` with ChainForge in a future release. 
+
 ## Sample output
 
 Running `pstats.analyze()` and then `pstats.print_analysis_summary(analysis)` prints a full statistical report to the terminal, including confidence interval line plots, pairwise comparisons between prompt templates, and per-input stability across runs (how stable the model is across multiple runs for the same input). Below is example excerpt from an analysis of a 4-template sentiment-classification benchmark (GPT-4.1-nano, 27 inputs, 3 runs, 3 evaluators):
@@ -53,29 +55,6 @@ promptstats analyze results.csv
 The input file should have columns `template`, `input`, and `score` (run and evaluator columns are optional). Run `promptstats analyze --help` for the full list of options and supported column aliases.
 
 For more complex statistical analysis with mixed effects models, see below for install instructions. R and pymer4 are required dependencies.
-
-## Running Examples
-
-From the repository root, run any example script directly:
-
-```bash
-python examples/synthetic_mean_advantage.py
-```
-
-Additional examples:
-
-```bash
-# OpenAI sentiment benchmark + promptstats router analysis
-python examples/sentiment_router.py
-
-# Multi-run variant (captures run-to-run variability)
-python examples/sentiment_router_multirun.py
-
-# Multi-model comparison across prompt templates
-python examples/compare_models_multirun.py
-```
-
-OpenAI-powered examples require `OPENAI_API_KEY` set in your environment. But, you can easily swap out the model calls to whatever model you prefer. 
 
 ## Python API
 
@@ -150,6 +129,29 @@ LLMs are stochastic at temperature>0. Will the performance stay similar, even up
 
 ![Per-input noise across runs](docs/per-input-noise.png)
 
+## Running Example Scripts
+
+We provide multiple standalone example scripts that rig up a simple benchmark, collect LLM responses, and run analyses over them. From the repository root, run any example script directly:
+
+```bash
+python examples/synthetic_mean_advantage.py
+```
+
+Additional examples:
+
+```bash
+# OpenAI sentiment benchmark + promptstats router analysis
+python examples/sentiment_router.py
+
+# Multi-run variant (captures run-to-run variability)
+python examples/sentiment_router_multirun.py
+
+# Multi-model comparison across prompt templates
+python examples/compare_models_multirun.py
+```
+
+OpenAI-powered examples require `OPENAI_API_KEY` set in your environment. But, you can easily swap out the model calls to whatever model you prefer. 
+
 ## Optional: Complex statistical analysis with mixed effects models
 
 > [!IMPORTANT]
@@ -196,8 +198,9 @@ Installation details may differ on your system.
 ## Future
 
 We aim to continue to contribute to `promptstats`. Ideas for future features:
-- Mixed-effects models (LMMs and potentially GLMMs) for more complex data. Currently, `promptstats` only supports the case of one input per prompt template, rather than a grid search (cross product) of different prompt variations.
+- Mixed-effects models (LMMs and potentially GLMMs) for multi-input data. Currently, `promptstats` only supports the case of one input per prompt template, rather than a grid search (cross product) of different prompt variations.
 - A default "report" mode that outputs a PDF summarizing findings and diving into the details
+- Integration with ChainForge as a front-end, to bring statistical analyses to plotted evals
 - Help developers quantify the "semantic variance" of the provided prompt templates, and perhaps even factor this into the calculation in an intelligent way. This is important because the current implementation doesn't know about the diversity/representativity of the input dataset and prompts. 
 
 ## Development
