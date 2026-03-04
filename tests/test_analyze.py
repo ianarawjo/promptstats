@@ -831,3 +831,107 @@ def test_analyze_median_and_mean_diverge_on_heavy_tailed_data():
         f"Median 95% CI lower bound should be positive (A > B is clear), "
         f"got ci_low={ab_median.ci_low:.3f}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Wilcoxon signed-rank outputs
+# ---------------------------------------------------------------------------
+
+def test_pairwise_wilcoxon_matches_scipy_and_is_symmetric_on_flip():
+    from scipy.stats import wilcoxon
+
+    scores = np.array(
+        [
+            [1.2, 2.0, 3.1, 2.8, 4.2, 5.0],
+            [1.0, 1.6, 2.9, 3.1, 3.8, 4.7],
+        ],
+        dtype=float,
+    )
+    diffs = scores[0] - scores[1]
+
+    result = ps.BenchmarkResult(
+        scores=scores,
+        template_labels=["A", "B"],
+        input_labels=[f"item_{i}" for i in range(scores.shape[1])],
+    )
+    analysis = ps.analyze(
+        result,
+        method="bootstrap",
+        correction="none",
+        n_bootstrap=300,
+        rng=np.random.default_rng(101),
+    )
+
+    pair_ab = analysis.pairwise.get("A", "B")
+    pair_ba = analysis.pairwise.get("B", "A")
+    expected_p = float(wilcoxon(diffs, zero_method="wilcox", alternative="two-sided").pvalue)
+
+    np.testing.assert_allclose(pair_ab.wilcoxon_p, expected_p, atol=1e-12)
+    np.testing.assert_allclose(pair_ba.wilcoxon_p, expected_p, atol=1e-12)
+
+
+def test_pairwise_wilcoxon_is_none_when_all_differences_are_zero():
+    scores = np.array(
+        [
+            [2.1, 3.4, 1.8, 4.0, 2.7, 3.3],
+            [2.1, 3.4, 1.8, 4.0, 2.7, 3.3],
+        ],
+        dtype=float,
+    )
+
+    result = ps.BenchmarkResult(
+        scores=scores,
+        template_labels=["A", "B"],
+        input_labels=[f"item_{i}" for i in range(scores.shape[1])],
+    )
+    analysis = ps.analyze(
+        result,
+        method="bootstrap",
+        correction="none",
+        n_bootstrap=300,
+        rng=np.random.default_rng(102),
+    )
+
+    pair_ab = analysis.pairwise.get("A", "B")
+    assert pair_ab.wilcoxon_p is None
+
+
+def test_pairwise_wilcoxon_respects_multiple_testing_correction():
+    scores = np.array(
+        [
+            [9.0, 8.7, 8.9, 8.8, 9.1, 8.6, 8.9, 9.0, 8.8, 8.7],
+            [8.2, 8.1, 8.4, 8.2, 8.3, 8.1, 8.5, 8.3, 8.0, 8.2],
+            [7.8, 7.9, 7.7, 8.0, 7.6, 7.8, 7.9, 7.7, 7.8, 7.6],
+        ],
+        dtype=float,
+    )
+    labels = ["A", "B", "C"]
+
+    result = ps.BenchmarkResult(
+        scores=scores,
+        template_labels=labels,
+        input_labels=[f"item_{i}" for i in range(scores.shape[1])],
+    )
+
+    analysis_raw = ps.analyze(
+        result,
+        method="bootstrap",
+        correction="none",
+        n_bootstrap=300,
+        rng=np.random.default_rng(103),
+    )
+    analysis_bonf = ps.analyze(
+        result,
+        method="bootstrap",
+        correction="bonferroni",
+        n_bootstrap=300,
+        rng=np.random.default_rng(103),
+    )
+
+    pairs = [("A", "B"), ("A", "C"), ("B", "C")]
+    n_pairs = len(pairs)
+    for a, b in pairs:
+        raw_p = analysis_raw.pairwise.get(a, b).wilcoxon_p
+        corr_p = analysis_bonf.pairwise.get(a, b).wilcoxon_p
+        expected_corr = min(float(raw_p) * n_pairs, 1.0)
+        np.testing.assert_allclose(corr_p, expected_corr, atol=1e-12)
