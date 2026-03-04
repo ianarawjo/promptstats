@@ -210,16 +210,16 @@ def test_build_parser_accepts_all_option_permutations():
 
 
 @pytest.mark.parametrize(
-    "fmt,detected_fmt,expected_loader,suffix",
+    "fmt,detected_fmt,suffix",
     [
-        ("wide", "long", "wide", ".csv"),
-        ("wide", "long", "wide", ".xlsx"),
-        ("long", "wide", "long", ".csv"),
-        ("long", "wide", "long", ".xlsx"),
-        ("auto", "wide", "wide", ".csv"),
-        ("auto", "wide", "wide", ".xlsx"),
-        ("auto", "long", "long", ".csv"),
-        ("auto", "long", "long", ".xlsx"),
+        ("wide", "long", ".csv"),
+        ("wide", "long", ".xlsx"),
+        ("long", "wide", ".csv"),
+        ("long", "wide", ".xlsx"),
+        ("auto", "wide", ".csv"),
+        ("auto", "wide", ".xlsx"),
+        ("auto", "long", ".csv"),
+        ("auto", "long", ".xlsx"),
     ],
 )
 def test_cmd_analyze_routes_format_and_forwards_options(
@@ -228,31 +228,28 @@ def test_cmd_analyze_routes_format_and_forwards_options(
     capsys,
     fmt,
     detected_fmt,
-    expected_loader,
     suffix,
 ):
     source_df = pd.DataFrame({"prompt": ["Prompt A"], "input": ["i1"], "score": [0.9]})
     file_path = tmp_path / f"data{suffix}"
     _write_example_data(file_path, source_df)
 
-    detect_calls = []
-    selected_loader = {"name": None}
+    from_dataframe_calls = []
     analysis_call = {}
     summary_call = {}
 
     result = _make_single_model_result()
 
-    def fake_detect_format(df):
-        detect_calls.append(df)
-        return detected_fmt
-
-    def fake_load_wide(df):
-        selected_loader["name"] = "wide"
-        return result
-
-    def fake_load_long(df):
-        selected_loader["name"] = "long"
-        return result
+    def fake_from_dataframe(df, *, format, return_report):
+        from_dataframe_calls.append(
+            {
+                "df": df,
+                "format": format,
+                "return_report": return_report,
+            }
+        )
+        report = type("Report", (), {"format_detected": detected_fmt})()
+        return result, report
 
     def fake_analyze(
         benchmark,
@@ -279,9 +276,7 @@ def test_cmd_analyze_routes_format_and_forwards_options(
     def fake_print_summary(analysis, top_pairwise):
         summary_call.update({"analysis": analysis, "top_pairwise": top_pairwise})
 
-    monkeypatch.setattr(cli, "_detect_format", fake_detect_format)
-    monkeypatch.setattr(cli, "_load_wide", fake_load_wide)
-    monkeypatch.setattr(cli, "_load_long", fake_load_long)
+    monkeypatch.setattr("promptstats.io.from_dataframe", fake_from_dataframe)
     monkeypatch.setattr("promptstats.core.router.analyze", fake_analyze)
     monkeypatch.setattr("promptstats.core.router.print_analysis_summary", fake_print_summary)
 
@@ -301,11 +296,9 @@ def test_cmd_analyze_routes_format_and_forwards_options(
     cli._cmd_analyze(args)
     out = capsys.readouterr().out
 
-    if fmt == "auto":
-        assert len(detect_calls) == 1
-    else:
-        assert len(detect_calls) == 0
-    assert selected_loader["name"] == expected_loader
+    assert len(from_dataframe_calls) == 1
+    assert from_dataframe_calls[0]["format"] == fmt
+    assert from_dataframe_calls[0]["return_report"] is True
 
     assert analysis_call == {
         "benchmark": result,
@@ -342,7 +335,13 @@ def test_cmd_analyze_rejects_reference_not_in_templates(tmp_path):
     with pytest.raises(SystemExit, match="1"):
         with pytest.MonkeyPatch.context() as mp:
             mp.setattr(cli, "_load_file", lambda path, sheet: df)
-            mp.setattr(cli, "_load_wide", lambda input_df: _make_single_model_result())
+            mp.setattr(
+                "promptstats.io.from_dataframe",
+                lambda input_df, **kwargs: (
+                    _make_single_model_result(),
+                    type("Report", (), {"format_detected": "wide"})(),
+                ),
+            )
             cli._cmd_analyze(args)
 
 
@@ -381,7 +380,13 @@ def test_cmd_analyze_allows_per_evaluator_for_multimodel(tmp_path, monkeypatch):
         return {"accuracy": {"ok": True}}
 
     monkeypatch.setattr(cli, "_load_file", lambda path, sheet: df)
-    monkeypatch.setattr(cli, "_load_long", lambda input_df: _make_multi_model_result())
+    monkeypatch.setattr(
+        "promptstats.io.from_dataframe",
+        lambda input_df, **kwargs: (
+            _make_multi_model_result(),
+            type("Report", (), {"format_detected": "long"})(),
+        ),
+    )
     monkeypatch.setattr("promptstats.core.router.analyze", fake_analyze)
     monkeypatch.setattr("promptstats.core.router.print_analysis_summary", lambda *a, **k: None)
 
@@ -414,7 +419,13 @@ def test_cmd_analyze_writes_requested_outputs(tmp_path, monkeypatch):
     )
 
     monkeypatch.setattr(cli, "_load_file", lambda path, sheet: df)
-    monkeypatch.setattr(cli, "_load_wide", lambda input_df: _make_single_model_result())
+    monkeypatch.setattr(
+        "promptstats.io.from_dataframe",
+        lambda input_df, **kwargs: (
+            _make_single_model_result(),
+            type("Report", (), {"format_detected": "wide"})(),
+        ),
+    )
     monkeypatch.setattr("promptstats.core.router.analyze", lambda *a, **k: {"ok": True})
     monkeypatch.setattr(
         "promptstats.core.router.print_analysis_summary",
@@ -497,7 +508,13 @@ def test_cmd_analyze_maps_analysis_value_error(tmp_path, monkeypatch):
     )
 
     monkeypatch.setattr(cli, "_load_file", lambda path, sheet: df)
-    monkeypatch.setattr(cli, "_load_wide", lambda input_df: _make_single_model_result())
+    monkeypatch.setattr(
+        "promptstats.io.from_dataframe",
+        lambda input_df, **kwargs: (
+            _make_single_model_result(),
+            type("Report", (), {"format_detected": "wide"})(),
+        ),
+    )
     monkeypatch.setattr(
         "promptstats.core.router.analyze",
         lambda *a, **k: (_ for _ in ()).throw(ValueError("analysis failed")),
