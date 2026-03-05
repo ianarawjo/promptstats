@@ -98,7 +98,7 @@ class OpenRouterModel(DeepEvalBaseLLM):
 #    n_shots:    few-shot examples prepended to each prompt (max 5)
 # ---------------------------------------------------------------------------
 
-N_PROBLEMS = 50
+N_PROBLEMS = 50  # adjust as desired for a quick test or fuller evaluation
 N_SHOTS_OPTIONS = [5, 3, 0]  # compare 5-shot, 3-shot, and 0-shot performance
 
 openai_model_name = "gpt-4.1-nano"

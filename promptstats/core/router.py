@@ -897,23 +897,29 @@ def _print_multi_model_summary(
     p_best = bundle.cross_model.rank_dist.p_best
     expected_ranks = bundle.cross_model.rank_dist.expected_ranks
     rank_labels = bundle.cross_model.rank_dist.labels
+    rank_pairs = [_split_model_template_label(label) for label in rank_labels]
     rank_bar_width = 14
     n_ranked_items = len(rank_labels)
-    label_col_width = min(40, max(len(label) for label in rank_labels) + 2)
+    model_col_width = min(24, max(len(model) for model, _ in rank_pairs) + 2)
+    template_col_width = min(24, max(len(template) for _, template in rank_pairs) + 2)
     top_indices = np.argsort(-p_best)
     n_show = len(top_indices)
     print(f"--- Rank Probabilities: All {n_show} by P(Best) ---")
     print(
-        f"  {'Model / Template':<{label_col_width}s} "
+        f"  {'Model':<{model_col_width}s} "
+        f"{'Template':<{template_col_width}s} "
         f"{'P(Best)':>9s} {'':<{rank_bar_width}s} "
         f"{'E[Rank]':>9s} {'':<{rank_bar_width}s}"
     )
     for idx in top_indices[:n_show]:
-        label = _truncate_label(rank_labels[idx], label_col_width)
+        model_label, template_label = rank_pairs[idx]
+        model_label = _truncate_label(model_label, model_col_width)
+        template_label = _truncate_label(template_label, template_col_width)
         p_best_i = float(p_best[idx])
         expected_rank_i = float(expected_ranks[idx])
         print(
-            f"  {label:<{label_col_width}s} "
+            f"  {model_label:<{model_col_width}s} "
+            f"{template_label:<{template_col_width}s} "
             f"{p_best_i:>8.1%} {_ratio_bar(p_best_i, width=rank_bar_width)} "
             f"{expected_rank_i:>8.2f} "
             f"{_rank_hump_lane(expected_rank_i, n_ranked_items, width=rank_bar_width)}"
@@ -952,7 +958,9 @@ def _print_multi_model_summary(
         f"spread percentiles = ({low_p:g}, {high_p:g})"
     )
     print(
-        f"  {'Model / Template':<{label_col_width}s} {'Interval Plot':<{line_width}s} "
+        f"  {'Model':<{model_col_width}s} "
+        f"{'Template':<{template_col_width}s} "
+        f"{'Interval Plot':<{line_width}s} "
         f"{stat_label:>8s} {'CI Low':>9s} {'CI High':>9s} {'Spread Lo':>10s} {'Spread Hi':>10s}"
     )
 
@@ -966,7 +974,9 @@ def _print_multi_model_summary(
             ref_offset = 0.0
 
     for idx in top_indices[:n_show]:
-        label = _truncate_label(ma.labels[idx], label_col_width)
+        model_label, template_label = _split_model_template_label(ma.labels[idx])
+        model_label = _truncate_label(model_label, model_col_width)
+        template_label = _truncate_label(template_label, template_col_width)
         line = _ascii_interval_line(
             mean=float(ma.point_advantages[idx]),
             ci_low=float(ma.bootstrap_ci_low[idx]),
@@ -983,7 +993,9 @@ def _print_multi_model_summary(
         abs_spread_low = float(ma.spread_low[idx]) + ref_offset
         abs_spread_high = float(ma.spread_high[idx]) + ref_offset
         print(
-            f"  {label:<{label_col_width}s} {line:<{line_width}s} "
+            f"  {model_label:<{model_col_width}s} "
+            f"{template_label:<{template_col_width}s} "
+            f"{line:<{line_width}s} "
             f"{abs_point:>7.3f} "
             f"{abs_ci_low:>8.3f} "
             f"{abs_ci_high:>8.3f} "
@@ -1674,6 +1686,14 @@ def _truncate_label(text: str, width: int) -> str:
     if width <= 3:
         return text[:width]
     return text[: width - 1] + "…"
+
+
+def _split_model_template_label(label: str) -> tuple[str, str]:
+    """Split labels of the form 'model / template' into separate columns."""
+    parts = label.split(" / ", 1)
+    if len(parts) == 2:
+        return parts[0], parts[1]
+    return label, ""
 
 
 def _ratio_bar(value: float, width: int = 12) -> str:
