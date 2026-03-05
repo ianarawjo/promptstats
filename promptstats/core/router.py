@@ -893,15 +893,175 @@ def _print_multi_model_summary(
 
     print()
     _print_loud_section("Cross-Model Ranking (all model/template pairs)")
-    print(
-        f"  {len(bundle.cross_model.rank_dist.labels)} pairs ranked. "
-        f"Top 5 by P(Best):"
-    )
+    _print_model_template_matrix(bundle)
     p_best = bundle.cross_model.rank_dist.p_best
-    top_indices = np.argsort(-p_best)[:5]
-    for idx in top_indices:
-        label = bundle.cross_model.rank_dist.labels[idx]
-        print(f"    {label:<40s}  P(Best)={p_best[idx]:.1%}")
+    expected_ranks = bundle.cross_model.rank_dist.expected_ranks
+    rank_labels = bundle.cross_model.rank_dist.labels
+    rank_bar_width = 14
+    n_ranked_items = len(rank_labels)
+    label_col_width = min(40, max(len(label) for label in rank_labels) + 2)
+    top_indices = np.argsort(-p_best)
+    n_show = len(top_indices)
+    print(f"--- Rank Probabilities: All {n_show} by P(Best) ---")
+    print(
+        f"  {'Model / Template':<{label_col_width}s} "
+        f"{'P(Best)':>9s} {'':<{rank_bar_width}s} "
+        f"{'E[Rank]':>9s} {'':<{rank_bar_width}s}"
+    )
+    for idx in top_indices[:n_show]:
+        label = _truncate_label(rank_labels[idx], label_col_width)
+        p_best_i = float(p_best[idx])
+        expected_rank_i = float(expected_ranks[idx])
+        print(
+            f"  {label:<{label_col_width}s} "
+            f"{p_best_i:>8.1%} {_ratio_bar(p_best_i, width=rank_bar_width)} "
+            f"{expected_rank_i:>8.2f} "
+            f"{_rank_hump_lane(expected_rank_i, n_ranked_items, width=rank_bar_width)}"
+        )
+
+    ma = bundle.cross_model.point_advantage
+    stat_label = ma.statistic.capitalize()
+    low_p, high_p = ma.spread_percentiles
+    ma_max_abs = max(
+        1e-12,
+        float(
+            np.max(
+                np.abs(
+                    np.concatenate(
+                        [
+                            ma.point_advantages,
+                            ma.bootstrap_ci_low,
+                            ma.bootstrap_ci_high,
+                            ma.spread_low,
+                            ma.spread_high,
+                        ]
+                    )
+                )
+            )
+        ),
+    )
+    ma_low = -ma_max_abs
+    ma_high = ma_max_abs
+    print()
+    print(
+        f"--- {stat_label} Advantage: All {n_show} (reference={ma.reference}) ---"
+    )
+    print(
+        f"  axis: [{ma_low:+.3f}, {ma_high:+.3f}]  "
+        f"(· spread, ─ CI, ● {stat_label.lower()}, │ zero)  "
+        f"spread percentiles = ({low_p:g}, {high_p:g})"
+    )
+    print(
+        f"  {'Model / Template':<{label_col_width}s} {'Interval Plot':<{line_width}s} "
+        f"{stat_label:>8s} {'CI Low':>9s} {'CI High':>9s} {'Spread Lo':>10s} {'Spread Hi':>10s}"
+    )
+
+    if ma.reference == "grand_mean":
+        ref_offset = float(np.mean(bundle.cross_model.robustness.mean))
+    else:
+        try:
+            ref_idx = ma.labels.index(ma.reference)
+            ref_offset = float(bundle.cross_model.robustness.mean[ref_idx])
+        except ValueError:
+            ref_offset = 0.0
+
+    for idx in top_indices[:n_show]:
+        label = _truncate_label(ma.labels[idx], label_col_width)
+        line = _ascii_interval_line(
+            mean=float(ma.point_advantages[idx]),
+            ci_low=float(ma.bootstrap_ci_low[idx]),
+            ci_high=float(ma.bootstrap_ci_high[idx]),
+            spread_low=float(ma.spread_low[idx]),
+            spread_high=float(ma.spread_high[idx]),
+            axis_low=ma_low,
+            axis_high=ma_high,
+            width=line_width,
+        )
+        abs_point = float(ma.point_advantages[idx]) + ref_offset
+        abs_ci_low = float(ma.bootstrap_ci_low[idx]) + ref_offset
+        abs_ci_high = float(ma.bootstrap_ci_high[idx]) + ref_offset
+        abs_spread_low = float(ma.spread_low[idx]) + ref_offset
+        abs_spread_high = float(ma.spread_high[idx]) + ref_offset
+        print(
+            f"  {label:<{label_col_width}s} {line:<{line_width}s} "
+            f"{abs_point:>7.3f} "
+            f"{abs_ci_low:>8.3f} "
+            f"{abs_ci_high:>8.3f} "
+            f"{abs_spread_low:>9.3f} "
+            f"{abs_spread_high:>9.3f}"
+        )
+    print()
+
+
+def _print_model_template_matrix(bundle: MultiModelBundle) -> None:
+    """Print a model × template score matrix (mean ±std, heat encoding)."""
+    model_labels = bundle.benchmark.model_labels
+    template_labels = bundle.benchmark.template_labels
+
+    # Build (model, template) -> (mean, std) from the flat cross_model bundle.
+    # Labels are formatted as "model / template" by get_flat_result().
+    cell_mean: dict[tuple[str, str], float] = {}
+    for label, m in zip(
+        bundle.cross_model.rank_dist.labels,
+        bundle.cross_model.robustness.mean,
+    ):
+        parts = label.split(" / ", 1)
+        if len(parts) == 2:
+            cell_mean[(parts[0], parts[1])] = float(m)
+
+    all_means = list(cell_mean.values())
+    mn, mx = min(all_means), max(all_means)
+    best_mean = mx
+    heat_chars = "·░▒▓█"
+
+    def _heat(v: float) -> str:
+        if mx == mn:
+            return heat_chars[-1]
+        idx = min(int((v - mn) / (mx - mn) * len(heat_chars)), len(heat_chars) - 1)
+        return heat_chars[idx]
+
+    # Row averages (per model), column averages (per template).
+    # row_avg = {
+    #     mdl: float(np.mean([cell_mean[(mdl, t)] for t in template_labels if (mdl, t) in cell_mean]))
+    #     for mdl in model_labels
+    # }
+    # col_avg = {
+    #     t: float(np.mean([cell_mean[(mdl, t)] for mdl in model_labels if (mdl, t) in cell_mean]))
+    #     for t in template_labels
+    # }
+
+    # Cell width: at least enough for "0.800 ▓*" (8 chars), but expand
+    # when template labels are longer so header/data columns stay aligned.
+    CELL_W = max(8, max(len(t) for t in template_labels))
+    model_col_w = max(len(m) for m in model_labels)
+
+    def _fmt_cell(mdl: str, t: str) -> str:
+        if (mdl, t) not in cell_mean:
+            return f"{'N/A':^{CELL_W}}"
+        m = cell_mean[(mdl, t)]
+        h = _heat(m)
+        marker = "*" if m == best_mean else " "
+        return f"{m:.3f} {h}{marker}".rjust(CELL_W)
+
+    # Header
+    header = f"  {'':>{model_col_w}}"
+    for t in template_labels:
+        header += f"  {t:^{CELL_W}}"
+    print(header)
+
+    # Data rows
+    div = "  " + "─" * max(1, len(header) - 2)
+    print(div)
+    for mdl in model_labels:
+        row = f"  {mdl:>{model_col_w}}"
+        for t in template_labels:
+            row += f"  {_fmt_cell(mdl, t)}"
+            # row += f"   │  {row_avg[mdl]:.3f}"
+        print(row)
+
+    # Footer (column averages)
+    print(div)
+    print(f"  * = global best pair  |  heat: · (low) → █ (high), range [{mn:.3f}, {mx:.3f}]")
     print()
 
 
