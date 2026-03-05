@@ -15,7 +15,7 @@ rng = np.random.default_rng(7)
 # A and B are similarly strong; C is clearly weaker.
 # Replace with your own data or generation process as desired.
 n_inputs = 120
-scores = {
+scores_dict = {
     # These are normal distributions around the mean (loc) and standard deviation (scale)
     "prompt_a": rng.normal(loc=0.80, scale=0.08, size=n_inputs),
     "prompt_b": rng.normal(loc=0.81, scale=0.06, size=n_inputs),
@@ -23,7 +23,7 @@ scores = {
 }
 
 report = pstats.compare_prompts(
-    scores,
+    scores_dict,
     statistic="mean",
     correction="holm",
     n_bootstrap=2_000,

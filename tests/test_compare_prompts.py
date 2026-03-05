@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 
 import promptstats as ps
-from promptstats.compare import ComparePromptsReport, PromptStats
+from promptstats.compare import CompareReport, EntityStats
 
 
 # ---------------------------------------------------------------------------
@@ -72,7 +72,7 @@ def test_compare_prompts_returns_report():
         n_bootstrap=500,
         rng=_rng(),
     )
-    assert isinstance(report, ComparePromptsReport)
+    assert isinstance(report, CompareReport)
 
 
 def test_report_has_expected_attributes():
@@ -116,7 +116,7 @@ def test_prompt_stats_fields_present():
     )
     for label in ("a", "b"):
         s = report.prompt_stats[label]
-        assert isinstance(s, PromptStats)
+        assert isinstance(s, EntityStats)
         assert isinstance(s.mean, float)
         assert isinstance(s.median, float)
         assert isinstance(s.std, float)

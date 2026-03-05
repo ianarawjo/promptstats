@@ -1,13 +1,14 @@
 """High-level comparison API for prompt templates.
 
-Provides ``compare_prompts()``, a simple entry point for the most common
-use case: you have score arrays for two or more prompt variants and want
-to know whether any difference is statistically meaningful.
+Provides ``compare_prompts()`` and ``compare_models()``, simple entry
+points for the most common use cases: compare prompt variants within a
+single model, or compare models while accounting for prompt sensitivity.
 
-Internally, ``compare_prompts()`` builds a ``BenchmarkResult`` from the
-provided dict, runs the full ``analyze()`` pipeline, and wraps the results
-in a ``ComparePromptsReport`` that surfaces the most useful numbers without
-requiring knowledge of the underlying data structures.
+Internally, these helpers build ``BenchmarkResult`` or
+``MultiModelBenchmark`` objects from dictionaries, run the full
+``analyze()`` pipeline, and return lightweight report objects that surface
+the most useful numbers without requiring knowledge of the underlying data
+structures.
 """
 
 from __future__ import annotations
@@ -17,36 +18,19 @@ from typing import Literal, Optional
 
 import numpy as np
 
-from .core.types import BenchmarkResult
-from .core.router import analyze, AnalysisBundle, print_analysis_summary
+from .core.types import BenchmarkResult, MultiModelBenchmark
+from .core.router import analyze, AnalysisBundle, MultiModelBundle, print_analysis_summary
 from .core.paired import PairwiseMatrix, PairedDiffResult
 from .core.resampling import bootstrap_means_1d, bca_interval_1d, resolve_resampling_method
 
 
 # ---------------------------------------------------------------------------
-# Per-template stats dataclass
+# Shared stats/report dataclasses
 # ---------------------------------------------------------------------------
 
 @dataclass
-class PromptStats:
-    """Descriptive and inferential statistics for a single prompt.
-
-    Attributes
-    ----------
-    mean : float
-        Mean score across all inputs (and runs, when multi-run data is given).
-    median : float
-        Median score across inputs.
-    std : float
-        Standard deviation of scores across inputs (between-input variance on
-        cell means).
-    ci_low : float
-        Lower bound of the bootstrapped confidence interval on the configured
-        statistic.
-    ci_high : float
-        Upper bound of the bootstrapped confidence interval on the configured
-        statistic.
-    """
+class EntityStats:
+    """Descriptive and inferential statistics for one compared entity."""
 
     mean: float
     median: float
@@ -55,95 +39,46 @@ class PromptStats:
     ci_high: float
 
 
-# ---------------------------------------------------------------------------
-# Report dataclass
-# ---------------------------------------------------------------------------
-
 @dataclass
-class ComparePromptsReport:
-    """Results from :func:`compare_prompts`.
-
-    Attributes
-    ----------
-    labels : list[str]
-        Prompt labels in the order they were given.
-    prompt_stats : dict[str, PromptStats]
-        Per-prompt descriptive statistics and bootstrapped confidence
-        intervals on the requested statistic.
-    pairwise_p_values : dict[tuple[str, str], dict[str, float or None]]
-        Pairwise p-values keyed by prompt-label tuples, for example
-        ``("baseline", "v2")`` -> ``{"p_boot": ..., "p_wilcoxon": ...}``.
-        Keys are stored in the same orientation as ``pairwise.results``.
-        Use :meth:`get_pairwise_p_values` for direction-agnostic access.
-    winners : list[str] or None
-        Top prompt(s) under pairwise significance at level ``alpha``.
-        A prompt is included when no other prompt is significantly better
-        than it. If all prompts are tied (no significant pairwise
-        differences), this is ``None``.
-    p_best : float
-        The minimum correction-adjusted p-value for the numerically best
-        prompt vs any other prompt. When ``winners`` is ``None`` this is
-        still the minimum p-value among all pairwise comparisons, useful
-        for understanding how close the result was.
-    pairwise : PairwiseMatrix
-        Full pairwise comparison matrix with correction-adjusted p-values and
-        bootstrapped confidence intervals.  Access individual comparisons
-        via ``pairwise.get("A", "B")``.
-    full_analysis : AnalysisBundle
-        The complete analysis bundle returned by ``analyze()``.  Useful
-        for accessing rank distributions, point-advantage plots,
-        robustness metrics, and seed-variance decompositions.
-    alpha : float
-        Significance level used to determine winners (default 0.05).
-    statistic : str
-        Statistic used for comparisons and winner selection (``'mean'`` or
-        ``'median'``).
-    correction : str
-        Multiple-comparison correction used for pairwise p-values.
-    """
+class CompareReport:
+    """Unified comparison report for prompts or models."""
 
     labels: list[str]
-    prompt_stats: dict[str, PromptStats]
+    entity_stats: dict[str, EntityStats]
     pairwise_p_values: dict[tuple[str, str], dict[str, Optional[float]]]
     winners: Optional[list[str]]
     p_best: float
     pairwise: PairwiseMatrix
-    full_analysis: AnalysisBundle
+    full_analysis: AnalysisBundle | MultiModelBundle
     alpha: float = 0.05
     statistic: Literal["mean", "median"] = "mean"
     correction: Literal["holm", "bonferroni", "fdr_bh", "none"] = "holm"
-
-    # ------------------------------------------------------------------
-    # Convenience accessors (backward compat with .means usage)
-    # ------------------------------------------------------------------
+    entity_name_singular: str = "prompt"
+    entity_name_plural: str = "prompts"
 
     @property
     def means(self) -> dict[str, float]:
-        """Mean score per prompt (shorthand for ``{l: prompt_stats[l].mean}``)."""
-        return {l: self.prompt_stats[l].mean for l in self.labels}
+        return {label: self.entity_stats[label].mean for label in self.labels}
 
-    # ------------------------------------------------------------------
-    # Computed properties
-    # ------------------------------------------------------------------
+    @property
+    def prompt_stats(self) -> dict[str, EntityStats]:
+        return self.entity_stats
+
+    @property
+    def model_stats(self) -> dict[str, EntityStats]:
+        return self.entity_stats
 
     @property
     def significant(self) -> bool:
-        """True if any prompt is significantly better than another."""
         return self.winners is not None
 
     @property
     def winner(self) -> Optional[str]:
-        """Backward-compatible singular winner.
-
-        Returns the label only when exactly one winner exists; otherwise
-        returns ``None``.
-        """
         if self.winners is None or len(self.winners) != 1:
             return None
         return self.winners[0]
 
     def quick_summary(self) -> str:
-        """Human-readable one-line summary of the comparison result."""
         best_label = self._best_label()
         pair = self._best_pair()
         diff = pair.point_diff
@@ -151,69 +86,46 @@ class ComparePromptsReport:
         p = pair.p_value
         n = len(self.labels)
         stat_name = self.statistic
-        best_stat = getattr(self.prompt_stats[best_label], stat_name)
+        best_stat = getattr(self.entity_stats[best_label], stat_name)
         delta_name = f"Δ{stat_name}"
-        correction_text = (
-            "uncorrected"
-            if self.correction == "none"
-            else f"{self.correction}-corrected"
-        )
+        correction_text = "uncorrected" if self.correction == "none" else f"{self.correction}-corrected"
 
         if n == 2:
-            other = [l for l in self.labels if l != best_label][0]
+            other = [label for label in self.labels if label != best_label][0]
             if self.winners is not None:
                 return (
                     f"'{best_label}' is significantly better than '{other}' "
                     f"({delta_name}={diff:+.3f}, 95% CI [{ci_lo:.3f}, {ci_hi:.3f}], "
                     f"p={p:.4g}, {correction_text})"
                 )
+            return (
+                f"No significant difference between '{best_label}' and '{other}' "
+                f"({delta_name}={diff:+.3f}, 95% CI [{ci_lo:.3f}, {ci_hi:.3f}], "
+                f"p={p:.4g}, {correction_text})"
+            )
+
+        if self.winners is not None:
+            if len(self.winners) == 1:
+                winner_text = f"winner: '{self.winners[0]}'"
             else:
-                return (
-                    f"No significant difference between '{best_label}' and '{other}' "
-                    f"({delta_name}={diff:+.3f}, 95% CI [{ci_lo:.3f}, {ci_hi:.3f}], "
-                    f"p={p:.4g}, {correction_text})"
-                )
-        else:
-            if self.winners is not None:
-                if len(self.winners) == 1:
-                    winner_text = f"winner: '{self.winners[0]}'"
-                else:
-                    winner_text = "winners: " + ", ".join(f"'{w}'" for w in self.winners)
-                return (
-                    f"Top prompt set ({winner_text})"
-                )
-            else:
-                return (
-                    f"All prompts are tied under pairwise tests; '{best_label}' leads "
-                    f"numerically ({stat_name}={best_stat:.3f}) "
-                    f"(min p={p:.4g}, {correction_text})"
-                )
+                winner_text = "winners: " + ", ".join(f"'{winner}'" for winner in self.winners)
+            return f"Top {self.entity_name_singular} set ({winner_text})"
+
+        return (
+            f"All {self.entity_name_plural} are tied under pairwise tests; '{best_label}' leads "
+            f"numerically ({stat_name}={best_stat:.3f}) (min p={p:.4g}, {correction_text})"
+        )
 
     def summary(self) -> None:
-        """Print the full analysis summary to stdout."""
         print_analysis_summary(self.full_analysis)
 
-    # ------------------------------------------------------------------
-    # Display
-    # ------------------------------------------------------------------
-
     def print(self) -> None:
-        """Backward-compatible alias for :meth:`summary`."""
         self.summary()
 
-    # ------------------------------------------------------------------
-    # Private helpers
-    # ------------------------------------------------------------------
-
     def _best_label(self) -> str:
-        return max(self.labels, key=lambda l: getattr(self.prompt_stats[l], self.statistic))
+        return max(self.labels, key=lambda label: getattr(self.entity_stats[label], self.statistic))
 
     def get_pairwise_p_values(self, a: str, b: str) -> dict[str, Optional[float]]:
-        """Return pairwise p-values for templates ``a`` and ``b``.
-
-        The lookup is direction-agnostic: ``(a, b)`` and ``(b, a)`` return
-        the same dictionary.
-        """
         if (a, b) in self.pairwise_p_values:
             return self.pairwise_p_values[(a, b)]
         if (b, a) in self.pairwise_p_values:
@@ -221,13 +133,11 @@ class ComparePromptsReport:
         raise KeyError(f"No pairwise p-values found for ({a}, {b}).")
 
     def _best_pair(self) -> PairedDiffResult:
-        """Pairwise result for the best prompt vs its most distinguishable
-        competitor (lowest Holm-corrected p-value)."""
         best = self._best_label()
-        others = [l for l in self.labels if l != best]
+        others = [label for label in self.labels if label != best]
         return min(
             (self.pairwise.get(best, other) for other in others),
-            key=lambda r: r.p_value,
+            key=lambda result: result.p_value,
         )
 
 
@@ -264,6 +174,88 @@ def _compute_winners(
     return winners if winners else None
 
 
+def _normalize_compare_models_scores(
+    scores: dict,
+    template_labels: Optional[list[str]],
+) -> tuple[list[str], list[np.ndarray], Optional[list[str]]]:
+    labels = list(scores.keys())
+    values = list(scores.values())
+
+    if not values:
+        return labels, [], template_labels
+
+    nested_templates = all(isinstance(value, dict) for value in values)
+    if any(isinstance(value, dict) for value in values) and not nested_templates:
+        raise TypeError(
+            "scores values must be consistently array-like or nested dicts of template scores; "
+            "do not mix both forms."
+        )
+
+    if nested_templates:
+        first_templates = list(values[0].keys())
+        if template_labels is None:
+            resolved_template_labels = first_templates
+        else:
+            if len(template_labels) != len(first_templates):
+                raise ValueError(
+                    "template_labels length must match the number of templates (N). "
+                    f"Got {len(template_labels)} labels for N={len(first_templates)}."
+                )
+            if set(template_labels) != set(first_templates):
+                raise ValueError(
+                    "For nested dict input, template_labels must match the inner template keys. "
+                    f"Expected {sorted(first_templates)}, got {sorted(template_labels)}."
+                )
+            resolved_template_labels = list(template_labels)
+
+        expected_template_set = set(first_templates)
+        arrays: list[np.ndarray] = []
+
+        for model_label, model_templates in scores.items():
+            model_template_set = set(model_templates.keys())
+            if model_template_set != expected_template_set:
+                raise ValueError(
+                    "All nested model dicts must contain the same template keys. "
+                    f"Expected {sorted(expected_template_set)}, got {sorted(model_template_set)} "
+                    f"for model '{model_label}'."
+                )
+
+            per_template_arrays: list[np.ndarray] = []
+            for template_label in resolved_template_labels:
+                a = np.asarray(model_templates[template_label], dtype=np.float64)
+                if a.ndim not in (1, 2):
+                    raise ValueError(
+                        f"Score array for model '{model_label}', template '{template_label}' "
+                        f"has {a.ndim} dimensions. Expected 1-D (M inputs) or "
+                        "2-D (M inputs, R runs)."
+                    )
+                per_template_arrays.append(a)
+
+            arrays.append(np.stack(per_template_arrays, axis=0))
+
+        return labels, arrays, resolved_template_labels
+
+    arrays = []
+    for label, arr in scores.items():
+        a = np.asarray(arr, dtype=np.float64)
+        if a.ndim not in (1, 2):
+            raise ValueError(
+                f"Score array for '{label}' has {a.ndim} dimensions. "
+                "Expected 1-D (M inputs) or 2-D (M inputs, R runs). "
+                "For multiple templates, use nested dict form: "
+                "{model: {template: array}}."
+            )
+
+        if a.ndim == 1:
+            a = a[np.newaxis, :]
+        else:
+            a = a[np.newaxis, :, :]
+
+        arrays.append(a)
+
+    return labels, arrays, template_labels
+
+
 # ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
@@ -278,7 +270,7 @@ def compare_prompts(
     statistic: Literal["mean", "median"] = "mean",
     ci: float = 0.95,
     rng: Optional[np.random.Generator] = None,
-) -> ComparePromptsReport:
+) -> CompareReport:
     """Compare prompt templates with bootstrapped statistical tests.
 
     A convenience wrapper around :func:`analyze` for the common case where
@@ -318,7 +310,7 @@ def compare_prompts(
 
     Returns
     -------
-    ComparePromptsReport
+    CompareReport
 
     Examples
     --------
@@ -443,7 +435,7 @@ def compare_prompts(
         for (a, b), result in full_analysis.pairwise.results.items()
     }
 
-    prompt_stats: dict[str, PromptStats] = {}
+    entity_stats: dict[str, EntityStats] = {}
     for i, label in enumerate(labels):
         row = scores_2d[i]  # (M,) cell means
         point_est = float(np.nanmean(row)) if statistic == "mean" else float(np.nanmedian(row))
@@ -456,7 +448,7 @@ def compare_prompts(
             ci_low = float(np.percentile(boot_stats, 100 * alpha_ci / 2))
             ci_high = float(np.percentile(boot_stats, 100 * (1.0 - alpha_ci / 2)))
 
-        prompt_stats[label] = PromptStats(
+        entity_stats[label] = EntityStats(
             mean=float(rob.mean[i]),
             median=float(rob.median[i]),
             std=float(rob.std[i]),
@@ -467,15 +459,15 @@ def compare_prompts(
     # ------------------------------------------------------------------
     # Winners: top tier under pairwise significance.
     # ------------------------------------------------------------------
-    best_label = max(labels, key=lambda l: getattr(prompt_stats[l], statistic))
+    best_label = max(labels, key=lambda l: getattr(entity_stats[l], statistic))
     other_labels = [l for l in labels if l != best_label]
     best_pairs = [full_analysis.pairwise.get(best_label, other) for other in other_labels]
     p_best = float(min(r.p_value for r in best_pairs))
     winners = _compute_winners(labels, full_analysis.pairwise, alpha)
 
-    return ComparePromptsReport(
+    return CompareReport(
         labels=labels,
-        prompt_stats=prompt_stats,
+        entity_stats=entity_stats,
         pairwise_p_values=pairwise_p_values,
         winners=winners,
         p_best=p_best,
@@ -484,4 +476,197 @@ def compare_prompts(
         alpha=alpha,
         statistic=statistic,
         correction=correction,
+        entity_name_singular="prompt",
+        entity_name_plural="prompts",
+    )
+
+
+def compare_models(
+    scores: dict,
+    *,
+    alpha: float = 0.05,
+    n_bootstrap: int = 10_000,
+    correction: Literal["holm", "bonferroni", "fdr_bh", "none"] = "holm",
+    method: Literal["bootstrap", "bca", "auto"] = "auto",
+    statistic: Literal["mean", "median"] = "mean",
+    ci: float = 0.95,
+    template_model_collapse: Literal["mean", "as_runs"] = "as_runs",
+    template_labels: Optional[list[str]] = None,
+    rng: Optional[np.random.Generator] = None,
+) -> CompareReport:
+    """Compare models while accounting for prompt-template sensitivity.
+
+    Parameters
+    ----------
+        scores : dict
+            Mapping from model label to scores in one of these forms:
+
+            * ``{"model": array}`` where each array is:
+                - **1-D** ``(M,)`` for a single implicit template, or
+                - **2-D** ``(M, R)`` for a single implicit template with R runs.
+            * ``{"model": {"template": array}}`` where each inner array is:
+                - **1-D** ``(M,)``, or
+                - **2-D** ``(M, R)`` with R runs.
+
+            For the nested-dict form, all models must provide the same template
+            keys. If ``template_labels`` is omitted, inner-key order from the first
+            model is used.
+    alpha : float
+        Significance threshold for declaring winner models.
+    n_bootstrap : int
+        Bootstrap resamples.
+    correction : str
+        Multiple-comparisons correction.
+    method : str
+        Bootstrap variant.
+    statistic : str
+        Central-tendency statistic: ``'mean'`` or ``'median'``.
+    ci : float
+        Confidence level for intervals.
+    template_model_collapse : {"mean", "as_runs"}
+        Passed through to :func:`analyze` for the template-level view.
+    template_labels : list[str], optional
+        Prompt-template labels. If omitted, defaults to
+        ``template_0 ... template_{N-1}``.
+    rng : np.random.Generator, optional
+        Random-number generator for reproducibility.
+    """
+    if not isinstance(scores, dict):
+        raise TypeError(
+            "scores must be a dict mapping model labels to score arrays. "
+            "Example: {'gpt-4.1': [[...], [...]], 'llama-3.3': [[...], [...]]}"
+        )
+    if len(scores) < 2:
+        raise ValueError(
+            f"compare_models requires at least 2 models; got {len(scores)}."
+        )
+
+    if rng is None:
+        rng = np.random.default_rng()
+
+    labels, arrays, normalized_template_labels = _normalize_compare_models_scores(
+        scores,
+        template_labels,
+    )
+
+    ndims = {a.ndim for a in arrays}
+    if len(ndims) > 1:
+        raise ValueError(
+            "All score arrays must have the same number of dimensions. "
+            "Got a mix of 2-D and 3-D arrays."
+        )
+
+    ndim = next(iter(ndims))
+    ns = [a.shape[0] for a in arrays]
+    ms = [a.shape[1] for a in arrays]
+    if len(set(ns)) > 1:
+        raise ValueError(
+            "All score arrays must have the same number of templates (N). "
+            f"Got: {dict(zip(labels, ns))}"
+        )
+    if len(set(ms)) > 1:
+        raise ValueError(
+            "All score arrays must have the same number of inputs (M). "
+            f"Got: {dict(zip(labels, ms))}"
+        )
+    if ndim == 3:
+        rs = [a.shape[2] for a in arrays]
+        if len(set(rs)) > 1:
+            raise ValueError(
+                "All 3-D score arrays must have the same number of runs (R). "
+                f"Got: {dict(zip(labels, rs))}"
+            )
+
+    n_templates = ns[0]
+    n_inputs = ms[0]
+    resolved_template_labels = (
+        normalized_template_labels
+        if normalized_template_labels is not None
+        else [f"template_{i}" for i in range(n_templates)]
+    )
+    if len(resolved_template_labels) != n_templates:
+        raise ValueError(
+            "template_labels length must match the number of templates (N). "
+            f"Got {len(resolved_template_labels)} labels for N={n_templates}."
+        )
+
+    scores_arr = np.stack(arrays, axis=0)
+    input_labels = [f"input_{i}" for i in range(n_inputs)]
+    benchmark = MultiModelBenchmark(
+        scores=scores_arr,
+        model_labels=labels,
+        template_labels=resolved_template_labels,
+        input_labels=input_labels,
+    )
+
+    full_analysis = analyze(
+        benchmark,
+        method=method,
+        n_bootstrap=n_bootstrap,
+        correction=correction,
+        statistic=statistic,
+        ci=ci,
+        rng=rng,
+        template_model_collapse=template_model_collapse,
+    )
+    if not isinstance(full_analysis, MultiModelBundle):
+        raise RuntimeError("Expected multi-model analysis bundle from analyze().")
+
+    model_analysis = full_analysis.model_level
+    scores_2d = benchmark.get_model_mean_result().get_2d_scores()  # (P, M)
+    alpha_ci = 1.0 - ci
+    resolved_method = resolve_resampling_method(method, n_inputs)
+    rob = model_analysis.robustness
+
+    pairwise_p_values: dict[tuple[str, str], dict[str, Optional[float]]] = {
+        (a, b): {
+            "p_boot": float(result.p_value),
+            "p_wilcoxon": (
+                float(result.wilcoxon_p)
+                if result.wilcoxon_p is not None
+                else None
+            ),
+        }
+        for (a, b), result in model_analysis.pairwise.results.items()
+    }
+
+    entity_stats: dict[str, EntityStats] = {}
+    for i, label in enumerate(labels):
+        row = scores_2d[i]
+        point_est = float(np.nanmean(row)) if statistic == "mean" else float(np.nanmedian(row))
+
+        boot_stats = bootstrap_means_1d(row, n_bootstrap, rng, statistic=statistic)
+        if resolved_method == "bca":
+            ci_low, ci_high = bca_interval_1d(row, point_est, boot_stats, alpha_ci, statistic=statistic)
+        else:
+            ci_low = float(np.percentile(boot_stats, 100 * alpha_ci / 2))
+            ci_high = float(np.percentile(boot_stats, 100 * (1.0 - alpha_ci / 2)))
+
+        entity_stats[label] = EntityStats(
+            mean=float(rob.mean[i]),
+            median=float(rob.median[i]),
+            std=float(rob.std[i]),
+            ci_low=ci_low,
+            ci_high=ci_high,
+        )
+
+    best_label = max(labels, key=lambda l: getattr(entity_stats[l], statistic))
+    other_labels = [l for l in labels if l != best_label]
+    best_pairs = [model_analysis.pairwise.get(best_label, other) for other in other_labels]
+    p_best = float(min(r.p_value for r in best_pairs))
+    winners = _compute_winners(labels, model_analysis.pairwise, alpha)
+
+    return CompareReport(
+        labels=labels,
+        entity_stats=entity_stats,
+        pairwise_p_values=pairwise_p_values,
+        winners=winners,
+        p_best=p_best,
+        pairwise=model_analysis.pairwise,
+        full_analysis=full_analysis,
+        alpha=alpha,
+        statistic=statistic,
+        correction=correction,
+        entity_name_singular="model",
+        entity_name_plural="models",
     )
