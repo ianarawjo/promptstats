@@ -20,6 +20,8 @@ from typing import TYPE_CHECKING, Dict, Literal, Mapping, Optional, Union
 
 import numpy as np
 
+from promptstats.vis.critical_difference import plot_critical_difference
+
 from .types import BenchmarkResult, MultiModelBenchmark
 from .paired import PairwiseMatrix, all_pairwise
 from .ranking import RankDistribution, PointAdvantageResult, bootstrap_ranks, bootstrap_point_advantage
@@ -1193,11 +1195,14 @@ def _print_bundle_summary(
     # Friedman omnibus line (printed before the interval plot when pairs exist).
     if max_pairs > 0 and bundle.pairwise.friedman is not None:
         fr = bundle.pairwise.friedman
+        # Plotting a critical difference diagram example:
+        # fig = plot_critical_difference(fr, title="Friedman Test Critical Difference Diagram")
+        # fig.savefig("friedman_cd.png")
         fr_p_str = _format_p_value(fr.p_value)
         print(f"  Friedman omnibus: χ²({fr.df}) = {fr.statistic:.3f}, p = {fr_p_str}")
         if fr.p_value > 0.05:
             print(f"  [!] Friedman p > 0.05: no significant omnibus effect — treat pairwise results with caution.")
-
+    
     if max_pairs > 0:
         pair_max_abs = max(
             1e-12,
@@ -1267,6 +1272,19 @@ def _print_bundle_summary(
               f"p (wsr) = Wilcoxon signed-rank {bundle.pairwise.correction_method}-corrected; "
               f"p (nem) = Nemenyi post-hoc (Friedman-based, FWER-controlled)")
         print("  stars: * p<0.05, ** p<0.01, *** p<0.001")
+        print()
+        labels_sorted = [
+            label
+            for _, label in sorted(
+                zip(bundle.rank_dist.expected_ranks, bundle.rank_dist.labels),
+                key=lambda item: (float(item[0]), item[1]),
+            )
+        ]
+        _print_critical_difference_groups(
+            bundle.pairwise,
+            labels_sorted=labels_sorted,
+            p_source="bootstrap",
+        )
     
     # Seed variance section (only when seeded data is present).
     if bundle.seed_variance is not None:
@@ -1766,6 +1784,145 @@ def _rank_hump_lane(expected_rank: float, n_items: int, width: int = 14) -> str:
             lane[right] = char
 
     return "".join(lane)
+
+
+def _pairwise_rank_band_p(
+    pairwise: PairwiseMatrix,
+    label_a: str,
+    label_b: str,
+    *,
+    p_source: Literal["bootstrap", "wilcoxon"],
+) -> Optional[float]:
+    """Return the pairwise p-value used to decide rank-band indistinguishability."""
+    try:
+        result = pairwise.get(label_a, label_b)
+    except KeyError:
+        return None
+
+    if p_source == "bootstrap":
+        return float(result.p_value)
+    if p_source == "wilcoxon":
+        return None if result.wilcoxon_p is None else float(result.wilcoxon_p)
+
+    p_values = [float(result.p_value)]
+    if result.wilcoxon_p is not None:
+        p_values.append(float(result.wilcoxon_p))
+    return min(p_values) if len(p_values) > 0 else None
+
+
+def _critical_difference_groups(
+    pairwise: PairwiseMatrix,
+    *,
+    labels_sorted: list[str],
+    alpha: float = 0.05,
+    p_source: Literal["bootstrap", "wilcoxon"] = "bootstrap",
+) -> list[list[str]]:
+    """Return contiguous, maximal non-significant rank bands.
+
+    Groups are built on rank-sorted labels (best first) and keep only
+    intervals where every within-group pair has p >= alpha under
+    ``p_source`` (bootstrap, Wilcoxon, or both).
+    """
+    if len(labels_sorted) < 2:
+        return []
+
+    n_labels = len(labels_sorted)
+
+    def _all_pairs_nonsignificant(group_labels: list[str]) -> bool:
+        for i in range(len(group_labels)):
+            for j in range(i + 1, len(group_labels)):
+                p_value = _pairwise_rank_band_p(
+                    pairwise,
+                    group_labels[i],
+                    group_labels[j],
+                    p_source=p_source,
+                )
+                if p_value is None or p_value < alpha:
+                    return False
+        return True
+
+    candidate_groups: list[list[str]] = []
+    for start_idx in range(n_labels - 1):
+        best_group: Optional[list[str]] = None
+        for end_idx in range(start_idx + 1, n_labels):
+            group = labels_sorted[start_idx : end_idx + 1]
+            if _all_pairs_nonsignificant(group):
+                best_group = group
+            else:
+                break
+        if best_group is not None:
+            candidate_groups.append(best_group)
+
+    def _is_contiguous_subsequence(smaller: list[str], larger: list[str]) -> bool:
+        if len(smaller) >= len(larger):
+            return False
+        max_start = len(larger) - len(smaller)
+        for start in range(max_start + 1):
+            if larger[start : start + len(smaller)] == smaller:
+                return True
+        return False
+
+    maximal_groups: list[list[str]] = []
+    for group in candidate_groups:
+        if any(
+            _is_contiguous_subsequence(group, other)
+            for other in candidate_groups
+            if other is not group
+        ):
+            continue
+        maximal_groups.append(group)
+
+    deduped: list[list[str]] = []
+    seen: set[tuple[str, ...]] = set()
+    for group in maximal_groups:
+        key = tuple(group)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(group)
+    return deduped
+
+
+def _print_critical_difference_groups(
+    pairwise: PairwiseMatrix,
+    *,
+    labels_sorted: list[str],
+    alpha: float = 0.05,
+    p_source: Literal["bootstrap", "wilcoxon"] = "bootstrap",
+) -> None:
+    """Print a short CD-style summary of statistically indistinguishable groups."""
+    if len(labels_sorted) < 2:
+        return
+
+    rank_pos = {label: idx + 1 for idx, label in enumerate(labels_sorted)}
+
+    source_label = {
+        "bootstrap": "p (boot)",
+        "wilcoxon": "p (wsr)",
+    }[p_source]
+
+    groups = _critical_difference_groups(
+        pairwise,
+        labels_sorted=labels_sorted,
+        alpha=alpha,
+        p_source=p_source,
+    )
+    if not groups:
+        print(
+            f"  Statistically indistinguishable rank bands "
+            f"({source_label}, α={alpha:g}): none"
+        )
+        return
+
+    print(
+        f"  Statistically indistinguishable rank bands "
+        f"({source_label}, α={alpha:g}):"
+    )
+    for group in groups:
+        start_rank = rank_pos[group[0]]
+        end_rank = rank_pos[group[-1]]
+        rank_span = f"#{start_rank}" if start_rank == end_rank else f"#{start_rank}–#{end_rank}"
+        print(f"    {rank_span}: [{' ─ '.join(group)}]")
 
 
 def _p_value_stars(p_value: Optional[float]) -> str:

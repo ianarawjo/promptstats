@@ -116,6 +116,7 @@ class FriedmanResult:
     df: int                                   # degrees of freedom = k - 1
     p_value: float                            # omnibus p-value
     nemenyi_p: dict[tuple[str, str], float]  # upper-triangle pairwise p-values
+    avg_ranks: dict[str, float]              # mean rank per template (1 = best)
     n_inputs: int                             # N blocks
     n_templates: int                          # k treatments
 
@@ -173,7 +174,7 @@ def friedman_nemenyi(scores: np.ndarray, labels: list[str]) -> FriedmanResult:
 
     # Average ranks: rank across k treatments within each input, then average.
     # rank_matrix[i, j] = rank of template i for input j.
-    rank_matrix = np.apply_along_axis(rankdata, 0, scores)  # (k, N)
+    rank_matrix = np.apply_along_axis(rankdata, 0, -scores)  # (k, N)
     avg_ranks = rank_matrix.mean(axis=1)  # (k,)
 
     # Nemenyi post-hoc: compare pairs via the Studentized range distribution.
@@ -187,11 +188,14 @@ def friedman_nemenyi(scores: np.ndarray, labels: list[str]) -> FriedmanResult:
             p = float(studentized_range.sf(q * np.sqrt(2), k, np.inf))
             nemenyi_p[(labels[i], labels[j])] = p
 
+    avg_ranks_dict = {labels[i]: float(avg_ranks[i]) for i in range(k)}
+
     return FriedmanResult(
         statistic=float(stat),
         df=k - 1,
         p_value=float(p_val),
         nemenyi_p=nemenyi_p,
+        avg_ranks=avg_ranks_dict,
         n_inputs=N,
         n_templates=k,
     )

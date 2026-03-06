@@ -18,6 +18,7 @@ from promptstats.core.router import (
     print_analysis_summary,
 )
 from promptstats.vis.advantage import plot_point_advantage
+from promptstats.vis.critical_difference import plot_critical_difference
 from promptstats.io import from_dataframe, DataLoadReport
 from promptstats.compare import (
     compare_prompts,
@@ -50,6 +51,7 @@ __all__ = [
     "MultiModelBundle",
     "print_analysis_summary",
     "plot_point_advantage",
+    "plot_critical_difference",
     "from_dataframe",
     "DataLoadReport",
     "compare_prompts",

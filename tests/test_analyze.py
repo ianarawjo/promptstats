@@ -2,6 +2,8 @@ import numpy as np
 import pytest
 
 import promptstats as ps
+from promptstats.core import router as router_core
+from promptstats.core.paired import PairedDiffResult, PairwiseMatrix
 
 
 def test_analyze_single_model_recovers_means_and_best_prompt():
@@ -234,6 +236,160 @@ def test_print_multimodel_summary_includes_collapsed_template_level_section(caps
     assert "CROSS-MODEL PER-TEMPLATE COMPARISON " in out
     assert "Best-performing prompt across models (by mean score)" in out
     assert "'Prompt A'" in out
+
+
+def test_print_summary_includes_critical_difference_groups(capsys):
+    # Three identical templates => Nemenyi should mark all as indistinguishable.
+    scores = np.array(
+        [
+            [0.7, 0.8, 0.9, 0.8, 0.7, 0.9],
+            [0.7, 0.8, 0.9, 0.8, 0.7, 0.9],
+            [0.7, 0.8, 0.9, 0.8, 0.7, 0.9],
+            [0.1, 0.2, 0.3, 0.2, 0.1, 0.3],
+        ],
+        dtype=float,
+    )
+    result = ps.BenchmarkResult(
+        scores=scores,
+        template_labels=["Prompt A", "Prompt B", "Prompt C", "Prompt D"],
+        input_labels=[f"i{i}" for i in range(scores.shape[1])],
+    )
+
+    analysis = ps.analyze(
+        result,
+        n_bootstrap=300,
+        rng=np.random.default_rng(42),
+    )
+
+    ps.print_analysis_summary(analysis, top_pairwise=3)
+    out = capsys.readouterr().out
+
+    assert "Statistically indistinguishable" in out
+    assert "[Prompt A ─ Prompt B ─ Prompt C]" in out
+    assert "#" in out
+    assert "Prompt D" in out
+
+
+def test_critical_difference_groups_has_two_separate_rank_bands():
+    labels = ["Prompt A", "Prompt B", "Prompt C", "Prompt D", "Prompt E"]
+    p_boot = {
+        ("Prompt A", "Prompt B"): 0.42,
+        ("Prompt A", "Prompt C"): 0.01,
+        ("Prompt B", "Prompt C"): 0.02,
+        ("Prompt C", "Prompt D"): 0.01,
+        ("Prompt D", "Prompt E"): 0.31,
+    }
+    p_wsr = {
+        ("Prompt A", "Prompt B"): 0.35,
+        ("Prompt A", "Prompt C"): 0.02,
+        ("Prompt B", "Prompt C"): 0.01,
+        ("Prompt C", "Prompt D"): 0.03,
+        ("Prompt D", "Prompt E"): 0.40,
+    }
+
+    results: dict[tuple[str, str], PairedDiffResult] = {}
+    for i, label_a in enumerate(labels):
+        for label_b in labels[i + 1 :]:
+            boot_p = p_boot.get((label_a, label_b), 0.001)
+            wsr_p = p_wsr.get((label_a, label_b), 0.001)
+            results[(label_a, label_b)] = PairedDiffResult(
+                template_a=label_a,
+                template_b=label_b,
+                point_diff=0.0,
+                std_diff=0.0,
+                ci_low=0.0,
+                ci_high=0.0,
+                p_value=float(boot_p),
+                test_method="bootstrap",
+                n_inputs=30,
+                per_input_diffs=np.zeros(30, dtype=float),
+                n_runs=1,
+                statistic="mean",
+                wilcoxon_p=float(wsr_p),
+            )
+
+    pairwise = PairwiseMatrix(
+        labels=labels,
+        results=results,
+        correction_method="holm",
+        friedman=None,
+    )
+
+    groups = router_core._critical_difference_groups(
+        pairwise,
+        labels_sorted=labels,
+        alpha=0.05,
+        p_source="both",
+    )
+
+    assert groups == [
+        ["Prompt A", "Prompt B"],
+        ["Prompt D", "Prompt E"],
+    ]
+
+
+def test_critical_difference_groups_can_have_overlapping_rank_bands():
+    labels = ["Prompt A", "Prompt B", "Prompt C", "Prompt D", "Prompt E"]
+    p_boot = {
+        ("Prompt A", "Prompt B"): 0.70,
+        ("Prompt A", "Prompt C"): 0.21,
+        ("Prompt B", "Prompt C"): 0.56,
+        ("Prompt A", "Prompt D"): 0.01,
+        ("Prompt B", "Prompt D"): 0.01,
+        ("Prompt C", "Prompt D"): 0.43,
+        ("Prompt C", "Prompt E"): 0.25,
+        ("Prompt D", "Prompt E"): 0.52,
+    }
+    p_wsr = {
+        ("Prompt A", "Prompt B"): 0.61,
+        ("Prompt A", "Prompt C"): 0.18,
+        ("Prompt B", "Prompt C"): 0.67,
+        ("Prompt A", "Prompt D"): 0.02,
+        ("Prompt B", "Prompt D"): 0.01,
+        ("Prompt C", "Prompt D"): 0.40,
+        ("Prompt C", "Prompt E"): 0.20,
+        ("Prompt D", "Prompt E"): 0.44,
+    }
+
+    results: dict[tuple[str, str], PairedDiffResult] = {}
+    for i, label_a in enumerate(labels):
+        for label_b in labels[i + 1 :]:
+            boot_p = p_boot.get((label_a, label_b), 0.001)
+            wsr_p = p_wsr.get((label_a, label_b), 0.001)
+            results[(label_a, label_b)] = PairedDiffResult(
+                template_a=label_a,
+                template_b=label_b,
+                point_diff=0.0,
+                std_diff=0.0,
+                ci_low=0.0,
+                ci_high=0.0,
+                p_value=float(boot_p),
+                test_method="bootstrap",
+                n_inputs=30,
+                per_input_diffs=np.zeros(30, dtype=float),
+                n_runs=1,
+                statistic="mean",
+                wilcoxon_p=float(wsr_p),
+            )
+
+    pairwise = PairwiseMatrix(
+        labels=labels,
+        results=results,
+        correction_method="holm",
+        friedman=None,
+    )
+
+    groups = router_core._critical_difference_groups(
+        pairwise,
+        labels_sorted=labels,
+        alpha=0.05,
+        p_source="both",
+    )
+
+    assert groups == [
+        ["Prompt A", "Prompt B", "Prompt C"],
+        ["Prompt C", "Prompt D", "Prompt E"],
+    ]
 
 
 def test_analyze_multimodel_template_collapse_as_runs_preserves_model_variance():
