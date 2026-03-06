@@ -17,9 +17,31 @@ from dataclasses import dataclass
 from typing import Literal, Optional
 
 import numpy as np
+from scipy.stats import rankdata
 
 from .resampling import bca_interval_1d, bootstrap_diffs_nested, bootstrap_means_1d, resolve_resampling_method, _stat
 from .stats_utils import correct_pvalues
+
+
+def _rank_biserial(diffs: np.ndarray) -> float:
+    """Rank biserial correlation for paired differences.
+
+    Computed from the signed-rank decomposition of ``diffs``: rank the absolute
+    values of non-zero differences, then return (R+ - R-) / (R+ + R-), where
+    R+ and R- are the sums of ranks for positive and negative differences
+    respectively.  Returns 0.0 when all differences are zero.
+
+    Interpretation guidelines (Kerby, 2014): small ≈ 0.1, medium ≈ 0.3,
+    large ≈ 0.5.  Range is [-1, 1].
+    """
+    nonzero = diffs[diffs != 0]
+    if len(nonzero) == 0:
+        return 0.0
+    ranks = rankdata(np.abs(nonzero))
+    r_plus = float(np.sum(ranks[nonzero > 0]))
+    r_minus = float(np.sum(ranks[nonzero < 0]))
+    total = r_plus + r_minus
+    return (r_plus - r_minus) / total if total > 0 else 0.0
 
 
 def _wilcoxon_signed_rank_p(diffs: np.ndarray) -> Optional[float]:
@@ -61,24 +83,20 @@ class PairedDiffResult:
     wilcoxon_p: Optional[float] = None  # Wilcoxon signed-rank p-value (two-sided, on per_input_diffs)
 
     @property
-    def cohens_d(self) -> float:
-        """Cohen's d_z for paired designs: point_diff / std_diff.
+    def rank_biserial(self) -> float:
+        """Rank biserial correlation for paired differences.
 
-        Computed as the mean (or median) of within-pair differences divided by
-        the standard deviation of those differences — the standard
-        paired-samples effect size (Cohen, 1988).  Interpretation guidelines:
-        small ≈ 0.2, medium ≈ 0.5, large ≈ 0.8.  Returns ±inf when
-        std_diff == 0 and point_diff != 0 (constant advantage across all
-        inputs).
+        Computed from ``per_input_diffs`` via the signed-rank decomposition:
+        rank absolute non-zero differences, then return (R+ − R−) / (R+ + R−).
+        Range is [−1, 1].  Interpretation guidelines (Kerby, 2014):
+        small ≈ 0.1, medium ≈ 0.3, large ≈ 0.5.
         """
-        if self.std_diff == 0:
-            return float("inf") if self.point_diff != 0 else 0.0
-        return self.point_diff / self.std_diff
+        return _rank_biserial(self.per_input_diffs)
 
     @property
     def effect_size(self) -> float:
-        """Alias for ``cohens_d``."""
-        return self.cohens_d
+        """Alias for ``rank_biserial``."""
+        return self.rank_biserial
 
 
 @dataclass

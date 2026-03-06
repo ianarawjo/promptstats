@@ -1213,7 +1213,7 @@ def _print_bundle_summary(
             f"  {'Pair':<{pair_col_width}s} {'Interval Plot':<{line_width}s} "
             f"{pair_stat_label:>{pair_stat_col_width}s} "
             f"{'CI Low':>{pair_ci_col_width}s} {'CI High':>{pair_ci_col_width}s} "
-            f"{'d':>{pair_sigma_col_width}s} "
+            f"{'r_rb':>{pair_sigma_col_width}s} "
             f"{'p (boot)':>{pair_p_boot_col_width}s} {'p (wsr)':>{pair_p_wsr_col_width}s}"
         )
 
@@ -1234,8 +1234,8 @@ def _print_bundle_summary(
         )
         p_boot_str = _format_p_value(result.p_value)
         wsr_str = _format_p_value(result.wilcoxon_p)
-        d_val = result.cohens_d
-        d_str = f"{d_val:>{pair_sigma_col_width}.3f}" if np.isfinite(d_val) else f"{'±inf':>{pair_sigma_col_width}s}"
+        d_val = result.rank_biserial
+        d_str = f"{d_val:>{pair_sigma_col_width}.3f}"
         print(
             f"  {pair_label:<{pair_col_width}s} "
             f"{line:<{line_width}s} "
@@ -1250,7 +1250,7 @@ def _print_bundle_summary(
     if max_pairs == 0:
         print("  (no pairwise comparisons)")
     elif max_pairs > 0:
-        print(f"  d = Cohen's d_z (paired effect size: small≈0.2, medium≈0.5, large≈0.8)")
+        print(f"  r_rb = rank biserial effect size (small≈0.1, medium≈0.3, large≈0.5)")
         print(f"  p (boot) = bootstrap {bundle.pairwise.correction_method}-corrected; "
               f"p (wsr) = Wilcoxon signed-rank {bundle.pairwise.correction_method}-corrected")
         print("  stars: * p<0.05, ** p<0.01, *** p<0.001")
