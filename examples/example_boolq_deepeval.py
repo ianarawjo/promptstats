@@ -104,11 +104,13 @@ N_SHOTS_OPTIONS = [5, 3, 0]  # compare 5-shot, 3-shot, and 0-shot performance
 openai_model_name = "gpt-4.1-nano"
 openrouter_model_A = "mistralai/ministral-8b-2512"
 openrouter_model_B = "google/gemma-3-4b-it"
+openrouter_model_C = "qwen/qwen3-vl-8b-instruct"
 
 models = [
     OpenAIModel(openai_model_name),
     OpenRouterModel(openrouter_model_A),
     OpenRouterModel(openrouter_model_B),
+    OpenRouterModel(openrouter_model_C),
 ]
 
 

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "promptstats"
-version = "0.1.0"
+version = "0.1.1"
 description = "Statistically sane analysis methods for comparing prompt and LLM performance."
 readme = "README.md"
 requires-python = ">=3.9"
