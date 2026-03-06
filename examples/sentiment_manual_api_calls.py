@@ -356,9 +356,13 @@ def main():
     # -----------------------------------------------------------------------
     ranks = pstats.bootstrap_ranks(scores_2d, TEMPLATE_LABELS, n_bootstrap=5_000, rng=rng)
     print("=== Bootstrap Rank Probabilities ===")
-    print(f"  {'Template':<18s} {'P(Best)':>9s} {'E[Rank]':>9s}")
+    template_col_width = min(40, max(len("Template") + 1, max(len(label) for label in TEMPLATE_LABELS) + 2))
+    print(f"  {'Template':<{template_col_width}s} {'P(Best)':>9s} {'E[Rank]':>9s}")
     for i, label in enumerate(TEMPLATE_LABELS):
-        print(f"  {label:<18s} {ranks.p_best[i]:>8.1%} {ranks.expected_ranks[i]:>8.2f}")
+        print(
+            f"  {label:<{template_col_width}.{template_col_width}s} "
+            f"{ranks.p_best[i]:>8.1%} {ranks.expected_ranks[i]:>8.2f}"
+        )
     print()
 
     # -----------------------------------------------------------------------

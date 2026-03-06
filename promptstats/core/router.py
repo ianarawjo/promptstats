@@ -33,6 +33,26 @@ if TYPE_CHECKING:
 
 
 # ---------------------------------------------------------------------------
+# ANSI color helpers (disabled when stdout is not a TTY)
+# ---------------------------------------------------------------------------
+
+import sys as _sys
+
+_ANSI = _sys.stdout.isatty()
+
+_RESET         = "\033[0m"  if _ANSI else ""
+_BOLD          = "\033[1m"  if _ANSI else ""
+_DIM           = "\033[2m"  if _ANSI else ""
+_GREEN         = "\033[32m" if _ANSI else ""
+_YELLOW        = "\033[33m" if _ANSI else ""
+_CYAN          = "\033[36m" if _ANSI else ""
+_BRIGHT_GREEN  = "\033[92m" if _ANSI else ""
+_BRIGHT_YELLOW = "\033[93m" if _ANSI else ""
+_BRIGHT_CYAN   = "\033[96m" if _ANSI else ""
+_BRIGHT_RED    = "\033[91m" if _ANSI else ""
+
+
+# ---------------------------------------------------------------------------
 # Shape descriptor
 # ---------------------------------------------------------------------------
 
@@ -822,9 +842,27 @@ def print_analysis_summary(
 def _print_loud_section(title: str) -> None:
     heading = f" {title.upper()} "
     border = "=" * len(heading)
-    print(border)
-    print(heading)
-    print(border)
+    print(f"{_BOLD}{_BRIGHT_CYAN}{border}{_RESET}")
+    print(f"{_BOLD}{_BRIGHT_CYAN}{heading}{_RESET}")
+    print(f"{_BOLD}{_BRIGHT_CYAN}{border}{_RESET}")
+
+
+def _print_subsection(title: str) -> None:
+    """Print a secondary `--- Title ---` header in bold cyan."""
+    print(f"{_BOLD}{_CYAN}{title}{_RESET}")
+
+
+def _instability_color(instability: float) -> str:
+    """Return an ANSI color for an instability score (empty string when colors off)."""
+    if not _ANSI or np.isnan(instability):
+        return ""
+    if instability >= 0.20:
+        return _BRIGHT_RED
+    if instability >= 0.10:
+        return _YELLOW
+    if instability >= 0.05:
+        return ""  # neutral — no color applied
+    return _GREEN
 
 
 def _print_multi_model_summary(
@@ -844,7 +882,7 @@ def _print_multi_model_summary(
     model_str = ", ".join(bundle.benchmark.model_labels)
     print(f"Models: {model_str}")
     best_model, best_template = bundle.best_pair
-    print(f"Best pair: model='{best_model}'  template='{best_template}'")
+    print(f"{_BOLD}Best pair:{_RESET} model='{_BRIGHT_GREEN}{best_model}{_RESET}'  template='{_BRIGHT_GREEN}{best_template}{_RESET}'")
     print()
 
     _print_loud_section("Model-level comparison (across all prompts):")
@@ -869,7 +907,7 @@ def _print_multi_model_summary(
     best_template = bundle.template_level.benchmark.template_labels[best_idx]
     best_mean = float(bundle.template_level.robustness.mean[best_idx])
     print(
-        "  -> Best-performing prompt across models (by mean score): "
+        f"  {_BOLD}{_BRIGHT_GREEN}-> Best-performing prompt across models (by mean score):{_RESET} "
         f"'{best_template}' (mean={best_mean:.3f})"
     )
 
@@ -879,7 +917,7 @@ def _print_multi_model_summary(
         _print_cross_model_seed_instability(bundle, rows=instability_rows)
         most_stable_model, instability, *_ = instability_rows[0]
         print(
-            "  -> Most stable model across runs: "
+            f"  {_BOLD}{_BRIGHT_GREEN}-> Most stable model across runs:{_RESET} "
             f"'{most_stable_model}' "
             f"(instability={instability:.4f}, {_instability_label(instability)})"
         )
@@ -906,7 +944,7 @@ def _print_multi_model_summary(
     template_col_width = min(24, max(len(template) for _, template in rank_pairs) + 2)
     top_indices = np.argsort(-p_best)
     n_show = len(top_indices)
-    print(f"--- Rank Probabilities: All {n_show} by P(Best) ---")
+    _print_subsection(f"--- Rank Probabilities: All {n_show} by P(Best) ---")
     print(
         f"  {'Model':<{model_col_width}s} "
         f"{'Template':<{template_col_width}s} "
@@ -951,9 +989,7 @@ def _print_multi_model_summary(
     ma_low = -ma_max_abs
     ma_high = ma_max_abs
     print()
-    print(
-        f"--- {stat_label} Advantage: All {n_show} (reference={ma.reference}) ---"
-    )
+    _print_subsection(f"--- {stat_label} Advantage: All {n_show} (reference={ma.reference}) ---")
     print(
         f"  axis: [{ma_low:+.3f}, {ma_high:+.3f}]  "
         f"(· spread, ─ CI, ● {stat_label.lower()}, │ zero)  "
@@ -1055,7 +1091,10 @@ def _print_model_template_matrix(bundle: MultiModelBundle) -> None:
         m = cell_mean[(mdl, t)]
         h = _heat(m)
         marker = "*" if m == best_mean else " "
-        return f"{m:.3f} {h}{marker}".rjust(CELL_W)
+        plain = f"{m:.3f} {h}{marker}".rjust(CELL_W)
+        if m == best_mean:
+            return f"{_BOLD}{_BRIGHT_GREEN}{plain}{_RESET}"
+        return plain
 
     # Header
     header = f"  {'':>{model_col_w}}"
@@ -1108,23 +1147,26 @@ def _print_bundle_summary(
     )
     print()
 
-    print("--- Robustness ---")
+    _print_subsection("--- Robustness ---")
     print(bundle.robustness.summary_table().to_string())
     print()
 
-    print("--- Rank Probabilities ---")
+    _print_subsection("--- Rank Probabilities ---")
+    max_rank_label_len = max((len(label) for label in bundle.rank_dist.labels), default=0)
+    rank_label_col_width = min(40, max(len(item_singular_title) + 1, max_rank_label_len + 2))
     rank_bar_width = 14
     n_ranked_items = len(bundle.rank_dist.labels)
     print(
-        f"  {item_singular_title:<24s} "
+        f"  {item_singular_title:<{rank_label_col_width}s} "
         f"{'P(Best)':>9s} {'':<{rank_bar_width}s} "
         f"{'E[Rank]':>9s} {'':<{rank_bar_width}s}"
     )
     for i, label in enumerate(bundle.rank_dist.labels):
+        rank_label = _truncate_label(label, rank_label_col_width)
         p_best = float(bundle.rank_dist.p_best[i])
         expected_rank = float(bundle.rank_dist.expected_ranks[i])
         print(
-            f"  {label:<24s} "
+            f"  {rank_label:<{rank_label_col_width}s} "
             f"{p_best:>8.1%} {_ratio_bar(p_best, width=rank_bar_width)} "
             f"{expected_rank:>8.2f} {_rank_hump_lane(expected_rank, n_ranked_items, width=rank_bar_width)}"
         )
@@ -1132,7 +1174,7 @@ def _print_bundle_summary(
     print()
 
     stat_label = bundle.point_advantage.statistic.capitalize()
-    print(f"--- {stat_label} Advantage (reference={bundle.point_advantage.reference}) ---")
+    _print_subsection(f"--- {stat_label} Advantage (reference={bundle.point_advantage.reference}) ---")
     low_p, high_p = bundle.point_advantage.spread_percentiles
     ma = bundle.point_advantage
     ma_max_abs = max(
@@ -1186,7 +1228,7 @@ def _print_bundle_summary(
     # Determine statistic label from the first result (all share the same statistic).
     first_result = next(iter(bundle.pairwise.results.values()), None)
     pair_stat_label = first_result.statistic.capitalize() if first_result else "Mean"
-    print(f"--- Pairwise Comparisons (lowest p-value first) ---")
+    _print_subsection("--- Pairwise Comparisons (lowest p-value first) ---")
     pair_results = sorted(
         bundle.pairwise.results.values(),
         key=lambda r: (r.p_value, -abs(r.point_diff)),
@@ -1199,9 +1241,10 @@ def _print_bundle_summary(
         # fig = plot_critical_difference(fr, title="Friedman Test Critical Difference Diagram")
         # fig.savefig("friedman_cd.png")
         fr_p_str = _format_p_value(fr.p_value)
-        print(f"  Friedman omnibus: χ²({fr.df}) = {fr.statistic:.3f}, p = {fr_p_str}")
+        fr_p_color = _BRIGHT_GREEN if fr.p_value <= 0.05 else _YELLOW
+        print(f"  Friedman omnibus: χ²({fr.df}) = {fr.statistic:.3f}, p = {fr_p_color}{fr_p_str}{_RESET}")
         if fr.p_value > 0.05:
-            print(f"  [!] Friedman p > 0.05: no significant omnibus effect — treat pairwise results with caution.")
+            print(f"  {_YELLOW}[!] Friedman p > 0.05: no significant omnibus effect — treat pairwise results with caution.{_RESET}")
     
     if max_pairs > 0:
         pair_max_abs = max(
@@ -1347,7 +1390,7 @@ def _print_token_pareto_summary(
     # -----------------------------------------------------------------------
     # Option 2: dual-bar table
     # -----------------------------------------------------------------------
-    print(f"--- Token Usage vs. Performance [{col_type} tokens, {ci_pct}% CI] ---")
+    _print_subsection(f"--- Token Usage vs. Performance [{col_type} tokens, {ci_pct}% CI] ---")
     print(f"  {note}  |  bootstrap over {M} inputs")
     print()
 
@@ -1385,7 +1428,7 @@ def _print_token_pareto_summary(
                 dom_str += f" +{len(doms) - 1}"
             status = f"\u00b7 ({dom_str})"
         else:
-            status = "\u2605"  # ★
+            status = f"{_BRIGHT_YELLOW}\u2605{_RESET}"  # ★ (Pareto-optimal)
 
         tok_part = (
             f"{tok_strs[i]:>{max_tok_w}s} {ci_strs[i]:<{max_ci_w}s}  {tok_bar}"
@@ -1400,7 +1443,7 @@ def _print_token_pareto_summary(
 
     print(f"  {'─' * sep_len}")
     print(
-        f"  \u2605 Pareto-optimal   "
+        f"  {_BRIGHT_YELLOW}\u2605{_RESET} Pareto-optimal   "
         f"\u00b7 dominated by (statistically confirmed, {ci_pct}% CI)"
     )
     print()
@@ -1414,7 +1457,7 @@ def _print_token_pareto_summary(
     )
     n_excluded = N - len(frontier_sorted)
 
-    print("--- Quality Ladder (Pareto-optimal only, sorted by score) ---")
+    _print_subsection("--- Quality Ladder (Pareto-optimal only, sorted by score) ---")
     if n_excluded > 0:
         excluded = [l for l in labels if l not in frontier]
         ex_str = ", ".join(
@@ -1543,7 +1586,7 @@ def _print_seed_variance(
     to the reported instability score, while the bar *distribution* reveals
     whether noise is concentrated on a few inputs or spread uniformly.
     """
-    print(f"--- Per-input Variance Across Runs (R={sv.n_runs} runs) ---")
+    _print_subsection(f"--- Per-input Variance Across Runs (R={sv.n_runs} runs) ---")
     # Scale strip bars globally against the noisiest single cell so that
     # templates with low per-cell noise show short bars even if their
     # seed_fraction is high due to near-zero total_var.
@@ -1567,6 +1610,8 @@ def _print_seed_variance(
             sv.per_cell_seed_std[i], global_cell_max, max_width=strip_width
         )
         instability = float(sv.instability[i])
+        verdict = _instability_label(instability)
+        verdict_color = _instability_color(instability)
         print(
             f"  {_truncate_label(label, template_col_width):<{template_col_width}s}  "
             f"{strip:<{strip_width}s}  "
@@ -1574,7 +1619,7 @@ def _print_seed_variance(
             f"{np.sqrt(sv.input_var[i]):>{num_w}.4f}  "
             f"{np.sqrt(sv.total_var[i]):>{num_w}.4f}  "
             f"{instability:>{num_w}.4f}  "
-            f"{_instability_label(instability)}"
+            f"{verdict_color}{verdict}{_RESET}"
         )
     print()
 
@@ -1631,7 +1676,8 @@ def _print_cross_model_seed_instability(
     if len(rows) == 0:
         return
 
-    print("\n--- Cross-Model Instability (across templates & inputs) ---")
+    print()
+    _print_subsection("--- Cross-Model Instability (across templates & inputs) ---")
     print(
         "  lower is better (more stable): "
         "instability = mean within-cell run std"
@@ -1655,13 +1701,15 @@ def _print_cross_model_seed_instability(
         noisiest_value,
     ) in rows:
         noisiest_desc = f"{_truncate_label(noisiest_template, 16)} ({noisiest_value:.4f})"
+        verdict = _instability_label(overall_instability)
+        verdict_color = _instability_color(overall_instability)
         print(
             f"  {_truncate_label(model_label, model_w):<{model_w}s} "
             f"{overall_instability:>12.4f} "
             f"{template_instability_mean:>10.4f} "
             f"{template_instability_std:>9.4f} "
             f"{noisiest_desc:<24s} "
-            f"{_instability_label(overall_instability)}"
+            f"{verdict_color}{verdict}{_RESET}"
         )
     print()
 
@@ -1883,6 +1931,58 @@ def _critical_difference_groups(
     return deduped
 
 
+def _single_clear_winner_label(
+    pairwise: PairwiseMatrix,
+    *,
+    labels_sorted: list[str],
+    alpha: float = 0.05,
+    p_source: Literal["bootstrap", "wilcoxon"] = "bootstrap",
+) -> Optional[str]:
+    """Return the unique label that significantly beats every other label.
+
+    A label is a clear winner only when, for every other label, the oriented
+    pairwise comparison has both:
+    - p < alpha under ``p_source``
+    - positive point difference (winner - other > 0)
+    """
+    if len(labels_sorted) < 2:
+        return None
+
+    winners: list[str] = []
+    for candidate in labels_sorted:
+        candidate_beats_all = True
+        for other in labels_sorted:
+            if other == candidate:
+                continue
+
+            p_value = _pairwise_rank_band_p(
+                pairwise,
+                candidate,
+                other,
+                p_source=p_source,
+            )
+            if p_value is None or p_value >= alpha:
+                candidate_beats_all = False
+                break
+
+            try:
+                result = pairwise.get(candidate, other)
+            except KeyError:
+                candidate_beats_all = False
+                break
+
+            if float(result.point_diff) <= 0.0:
+                candidate_beats_all = False
+                break
+
+        if candidate_beats_all:
+            winners.append(candidate)
+            if len(winners) > 1:
+                return None
+
+    return winners[0] if len(winners) == 1 else None
+
+
 def _print_critical_difference_groups(
     pairwise: PairwiseMatrix,
     *,
@@ -1924,6 +2024,18 @@ def _print_critical_difference_groups(
         rank_span = f"#{start_rank}" if start_rank == end_rank else f"#{start_rank}–#{end_rank}"
         print(f"    {rank_span}: [{' ─ '.join(group)}]")
 
+    clear_winner = _single_clear_winner_label(
+        pairwise,
+        labels_sorted=labels_sorted,
+        alpha=alpha,
+        p_source=p_source,
+    )
+    if clear_winner is not None:
+        print()
+        print(
+            f"  {_BRIGHT_GREEN}-> Statistically distinguishable, clear winner:{_RESET} "
+            f"'{_BOLD}{_BRIGHT_GREEN}{clear_winner}{_RESET}'"
+        )
 
 def _p_value_stars(p_value: Optional[float]) -> str:
     """Return significance stars for p-value thresholds.

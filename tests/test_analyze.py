@@ -392,6 +392,142 @@ def test_critical_difference_groups_can_have_overlapping_rank_bands():
     ]
 
 
+def test_single_clear_winner_label_detects_unique_statistical_winner():
+    labels = ["Prompt A", "Prompt B", "Prompt C"]
+    results: dict[tuple[str, str], PairedDiffResult] = {
+        ("Prompt A", "Prompt B"): PairedDiffResult(
+            template_a="Prompt A",
+            template_b="Prompt B",
+            point_diff=0.30,
+            std_diff=0.05,
+            ci_low=0.20,
+            ci_high=0.40,
+            p_value=0.001,
+            test_method="bootstrap",
+            n_inputs=50,
+            per_input_diffs=np.zeros(50, dtype=float),
+            n_runs=1,
+            statistic="mean",
+            wilcoxon_p=0.002,
+        ),
+        ("Prompt A", "Prompt C"): PairedDiffResult(
+            template_a="Prompt A",
+            template_b="Prompt C",
+            point_diff=0.28,
+            std_diff=0.06,
+            ci_low=0.16,
+            ci_high=0.40,
+            p_value=0.003,
+            test_method="bootstrap",
+            n_inputs=50,
+            per_input_diffs=np.zeros(50, dtype=float),
+            n_runs=1,
+            statistic="mean",
+            wilcoxon_p=0.004,
+        ),
+        ("Prompt B", "Prompt C"): PairedDiffResult(
+            template_a="Prompt B",
+            template_b="Prompt C",
+            point_diff=0.01,
+            std_diff=0.08,
+            ci_low=-0.10,
+            ci_high=0.12,
+            p_value=0.42,
+            test_method="bootstrap",
+            n_inputs=50,
+            per_input_diffs=np.zeros(50, dtype=float),
+            n_runs=1,
+            statistic="mean",
+            wilcoxon_p=0.50,
+        ),
+    }
+
+    pairwise = PairwiseMatrix(
+        labels=labels,
+        results=results,
+        correction_method="holm",
+        friedman=None,
+    )
+
+    winner = router_core._single_clear_winner_label(
+        pairwise,
+        labels_sorted=labels,
+        alpha=0.05,
+        p_source="bootstrap",
+    )
+    assert winner == "Prompt A"
+
+
+def test_print_critical_difference_groups_includes_clear_winner_line(capsys):
+    labels = ["Prompt A", "Prompt B", "Prompt C"]
+    results: dict[tuple[str, str], PairedDiffResult] = {
+        ("Prompt A", "Prompt B"): PairedDiffResult(
+            template_a="Prompt A",
+            template_b="Prompt B",
+            point_diff=0.30,
+            std_diff=0.05,
+            ci_low=0.20,
+            ci_high=0.40,
+            p_value=0.001,
+            test_method="bootstrap",
+            n_inputs=50,
+            per_input_diffs=np.zeros(50, dtype=float),
+            n_runs=1,
+            statistic="mean",
+            wilcoxon_p=0.002,
+        ),
+        ("Prompt A", "Prompt C"): PairedDiffResult(
+            template_a="Prompt A",
+            template_b="Prompt C",
+            point_diff=0.28,
+            std_diff=0.06,
+            ci_low=0.16,
+            ci_high=0.40,
+            p_value=0.003,
+            test_method="bootstrap",
+            n_inputs=50,
+            per_input_diffs=np.zeros(50, dtype=float),
+            n_runs=1,
+            statistic="mean",
+            wilcoxon_p=0.004,
+        ),
+        ("Prompt B", "Prompt C"): PairedDiffResult(
+            template_a="Prompt B",
+            template_b="Prompt C",
+            point_diff=0.01,
+            std_diff=0.08,
+            ci_low=-0.10,
+            ci_high=0.12,
+            p_value=0.42,
+            test_method="bootstrap",
+            n_inputs=50,
+            per_input_diffs=np.zeros(50, dtype=float),
+            n_runs=1,
+            statistic="mean",
+            wilcoxon_p=0.50,
+        ),
+    }
+
+    pairwise = PairwiseMatrix(
+        labels=labels,
+        results=results,
+        correction_method="holm",
+        friedman=None,
+    )
+
+    router_core._print_critical_difference_groups(
+        pairwise,
+        labels_sorted=labels,
+        alpha=0.05,
+        p_source="bootstrap",
+    )
+    out = capsys.readouterr().out
+
+    assert "Statistically distinguishable, clear winner" in out
+    assert "'Prompt A'" in out
+    assert "Statistically indistinguishable rank bands" in out
+
+
 def test_analyze_multimodel_template_collapse_as_runs_preserves_model_variance():
     model_labels = ["m1", "m2", "m3"]
     prompt_labels = ["Prompt A", "Prompt B"]

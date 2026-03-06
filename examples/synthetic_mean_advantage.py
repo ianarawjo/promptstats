@@ -78,9 +78,13 @@ print()
 # --- Bootstrap ranking ---
 ranks = pstats.bootstrap_ranks(scores, labels, n_bootstrap=10_000, rng=rng)
 print("=== Bootstrap Rank Probabilities ===")
-print(f"{'Template':<25s} {'P(Best)':>8s} {'E[Rank]':>8s}")
+template_col_width = min(40, max(len("Template") + 1, max(len(label) for label in labels) + 2))
+print(f"{'Template':<{template_col_width}s} {'P(Best)':>8s} {'E[Rank]':>8s}")
 for i, label in enumerate(labels):
-    print(f"  {label:<23s} {ranks.p_best[i]:>7.1%} {ranks.expected_ranks[i]:>7.2f}")
+    print(
+        f"  {label:<{template_col_width}.{template_col_width}s} "
+        f"{ranks.p_best[i]:>7.1%} {ranks.expected_ranks[i]:>7.2f}"
+    )
 print()
 
 # --- Mean advantage (the key computation for the plot) ---
