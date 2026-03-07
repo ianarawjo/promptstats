@@ -15,12 +15,11 @@ Supported shapes
 from __future__ import annotations
 
 import warnings
-from dataclasses import dataclass, field
+import re
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Dict, Literal, Mapping, Optional, Union
 
 import numpy as np
-
-from promptstats.vis.critical_difference import plot_critical_difference
 
 from .types import BenchmarkResult, MultiModelBenchmark
 from .paired import PairwiseMatrix, all_pairwise
@@ -2364,36 +2363,249 @@ def _print_factorial_lmm_summary(bundle: "AnalysisBundle") -> None:
     _print_subsection("--- Factor Tests (Wald χ²) ---")
     ft = info.factor_tests
     if ft is not None and len(ft) > 0:
-        term_w = max(len("Term"), max(len(str(t)) for t in ft["term"]))
-        print(f"  {'Term':<{term_w}s}  {'χ²':>10s}  {'df':>4s}  {'p-value':>12s}")
-        print(f"  {'-' * term_w}  {'-' * 10}  {'-' * 4}  {'-' * 12}")
-        for _, row in ft.iterrows():
+        ft_sorted = ft.sort_values(["p_value", "statistic"], ascending=[True, False])
+        term_w = min(42, max(len("Term"), max(len(str(t)) for t in ft_sorted["term"]) + 2))
+        bar_w = 12
+        print(
+            f"  {'Term':<{term_w}s}  {'χ²':>10s}  {'df':>4s}  {'p-value':>12s}  {'Evidence':<{bar_w}s}"
+        )
+        print(f"  {'-' * term_w}  {'-' * 10}  {'-' * 4}  {'-' * 12}  {'-' * bar_w}")
+        for _, row in ft_sorted.iterrows():
             pval = float(row["p_value"])
-            stars = _p_value_stars(pval)
-            p_str = f"{pval:.4g}{stars}"
+            evidence = 1.0 - float(np.clip(pval, 0.0, 1.0)) if not np.isnan(pval) else np.nan
+            p_str = _format_p_value(pval)
             print(
-                f"  {str(row['term']):<{term_w}s}  "
+                f"  {_truncate_label(str(row['term']), term_w):<{term_w}s}  "
                 f"{float(row['statistic']):>10.3f}  "
                 f"{float(row['df']):>4.0f}  "
-                f"{p_str:>12s}"
+                f"{p_str:>12s}  "
+                f"{_ratio_bar(evidence, width=bar_w)}"
             )
+        n_sig = int(np.sum(ft_sorted["p_value"].to_numpy(dtype=float) < 0.05))
+        if n_sig == 0:
+            print(
+                f"  {_YELLOW}[!] No factor/interaction terms pass p < 0.05; "
+                "interpret level differences cautiously." + f"{_RESET}"
+            )
+        else:
+            print(f"  Significant terms (p < 0.05): {n_sig}/{len(ft_sorted)}")
     else:
         print("  (no factor tests available)")
+
+    _print_factorial_interaction_plot(bundle, factor_tests=ft)
 
     # Estimated marginal means per factor
     mm = info.marginal_means
     if mm:
+        line_width = 41
         for factor_name, mm_df in mm.items():
             print()
             _print_subsection(f"--- Marginal Means: {factor_name} ---")
-            level_w = max(len("Level"), max(len(str(v)) for v in mm_df["level"]))
-            print(f"  {'Level':<{level_w}s}  {'Mean':>8s}  {'SE':>8s}  {'CI Low':>9s}  {'CI High':>9s}")
-            print(f"  {'-' * level_w}  {'-' * 8}  {'-' * 8}  {'-' * 9}  {'-' * 9}")
-            for _, row in mm_df.iterrows():
+            if len(mm_df) == 0:
+                print("  (no marginal means available)")
+                continue
+
+            mm_sorted = mm_df.sort_values(["mean", "level"], ascending=[False, True]).reset_index(drop=True)
+            means = mm_sorted["mean"].to_numpy(dtype=float)
+            ci_low = mm_sorted["ci_low"].to_numpy(dtype=float)
+            ci_high = mm_sorted["ci_high"].to_numpy(dtype=float)
+
+            factor_center = float(np.mean(means))
+            centered_mean = means - factor_center
+            centered_low = ci_low - factor_center
+            centered_high = ci_high - factor_center
+
+            axis_max = max(
+                1e-12,
+                float(
+                    np.max(
+                        np.abs(
+                            np.concatenate(
+                                [
+                                    centered_mean,
+                                    centered_low,
+                                    centered_high,
+                                ]
+                            )
+                        )
+                    )
+                ),
+            )
+            axis_low = -axis_max
+            axis_high = axis_max
+            level_w = min(28, max(len("Level"), max(len(str(v)) for v in mm_sorted["level"]) + 2))
+
+            print(
+                f"  axis: [{axis_low:+.3f}, {axis_high:+.3f}]  "
+                "(─ CI, ● mean, │ factor mean)"
+            )
+            print(
+                f"  {'Level':<{level_w}s} {'Interval Plot':<{line_width}s} "
+                f"{'Mean':>8s} {'SE':>8s} {'CI Low':>9s} {'CI High':>9s} {'Δ vs avg':>10s}"
+            )
+            for i, row in mm_sorted.iterrows():
+                interval_line = _ascii_interval_line(
+                    mean=float(centered_mean[i]),
+                    ci_low=float(centered_low[i]),
+                    ci_high=float(centered_high[i]),
+                    spread_low=float(centered_mean[i]),
+                    spread_high=float(centered_mean[i]),
+                    axis_low=axis_low,
+                    axis_high=axis_high,
+                    width=line_width,
+                )
                 print(
-                    f"  {str(row['level']):<{level_w}s}  "
+                    f"  {_truncate_label(str(row['level']), level_w):<{level_w}s} "
+                    f"{interval_line:<{line_width}s} "
                     f"{float(row['mean']):>8.4f}  "
                     f"{float(row['se']):>8.4f}  "
                     f"{float(row['ci_low']):>9.4f}  "
-                    f"{float(row['ci_high']):>9.4f}"
+                    f"{float(row['ci_high']):>9.4f}  "
+                    f"{float(centered_mean[i]):>+10.4f}"
                 )
+            best_idx = int(np.argmax(means))
+            best_level = str(mm_sorted.iloc[best_idx]["level"])
+            best_mean = float(means[best_idx])
+            print(
+                f"  {_BRIGHT_GREEN}-> Highest marginal mean:{_RESET} "
+                f"'{_BOLD}{_BRIGHT_GREEN}{best_level}{_RESET}' (mean={best_mean:.4f}, Δ={centered_mean[best_idx]:+.4f} vs factor average)"
+            )
+
+
+def _factor_names_from_term(term: str) -> list[str]:
+    """Extract factor names from a model-term string such as ``C(a):C(b)``."""
+    names = re.findall(r"C\(([^)]+)\)", str(term))
+    if names:
+        return names
+    return [p.strip() for p in str(term).split(":") if p.strip()]
+
+
+def _print_factorial_interaction_plot(
+    bundle: "AnalysisBundle",
+    *,
+    factor_tests,
+    alpha: float = 0.05,
+) -> None:
+    """Render an optional terminal interaction plot via plotext when interaction is significant."""
+    info = bundle.factorial_lmm_info
+    if info is None or factor_tests is None or len(factor_tests) == 0:
+        return
+
+    is_interaction = factor_tests["term"].astype(str).str.contains(":", regex=False)
+    if not bool(np.any(is_interaction)):
+        return
+
+    sig_interactions = factor_tests.loc[
+        is_interaction & (factor_tests["p_value"].to_numpy(dtype=float) < alpha)
+    ]
+    if len(sig_interactions) == 0:
+        return
+
+    tf = bundle.benchmark.template_factors
+    if tf is None or len(tf) != bundle.benchmark.n_templates:
+        return
+
+    best_row = sig_interactions.sort_values(["p_value", "statistic"], ascending=[True, False]).iloc[0]
+    term = str(best_row["term"])
+    factors = _factor_names_from_term(term)
+    if len(factors) < 2:
+        return
+
+    x_factor, line_factor = factors[0], factors[1]
+    if x_factor not in tf.columns or line_factor not in tf.columns:
+        return
+
+    tf_plot = tf.copy()
+    tf_plot["_score"] = bundle.robustness.mean.astype(float)
+
+    group_cols = [x_factor, line_factor]
+    grouped = (
+        tf_plot.groupby(group_cols, observed=True, dropna=False)["_score"]
+        .mean()
+        .reset_index()
+    )
+    if len(grouped) == 0:
+        return
+
+    x_levels = [str(v) for v in tf_plot[x_factor].drop_duplicates().tolist()]
+    line_levels = [str(v) for v in tf_plot[line_factor].drop_duplicates().tolist()]
+
+    x_map = {str(v): i for i, v in enumerate(x_levels)}
+
+    grouped["_x_label"] = grouped[x_factor].astype(str)
+    grouped["_line_label"] = grouped[line_factor].astype(str)
+    grouped["_x_ord"] = grouped["_x_label"].map(x_map)
+    grouped = grouped.sort_values(["_line_label", "_x_ord"]).reset_index(drop=True)
+
+    print()
+    _print_subsection("--- Interaction Plot (significant interaction) ---")
+    print(
+        f"  term='{term}'  (p={_format_p_value(float(best_row['p_value']))}); "
+        f"x='{x_factor}', lines='{line_factor}'"
+    )
+
+    if len(factors) > 2:
+        held = ", ".join(factors[2:])
+        print(
+            f"  {_YELLOW}[!] Higher-order interaction detected; plot shows only first two factors "
+            f"and averages over: {held}.{_RESET}"
+        )
+
+    try:
+        import plotext as plt  # type: ignore[import-not-found]
+    except Exception:
+        print(
+            f"  {_YELLOW}[!] plotext not installed; skipping terminal interaction plot. "
+            "Install with `pip install plotext` to enable this view."
+            f"{_RESET}"
+        )
+        return
+
+    try:
+        plt.clear_figure()
+        plt.canvas_color("default")   # or "black"
+        plt.axes_color("default")     # or "black"
+        plt.ticks_color("white")
+        plt.plotsize(92, 22)
+        plt.title(f"Interaction: {x_factor} × {line_factor}")
+        plt.xlabel(x_factor)
+        plt.ylabel("mean score")
+
+        x_tick_vals = list(range(len(x_levels)))
+        plt.xticks(x_tick_vals, x_levels)
+
+        for line_level in line_levels:
+            part = grouped[grouped["_line_label"] == line_level]
+            if len(part) == 0:
+                continue
+            x_vals = part["_x_ord"].to_numpy(dtype=float).tolist()
+            y_vals = part["_score"].to_numpy(dtype=float).tolist()
+            plt.plot(x_vals, y_vals, marker="dot", label=line_level)
+
+        grid_fn = getattr(plt, "grid", None)
+        if callable(grid_fn):
+            try:
+                grid_fn(True, True)
+            except TypeError:
+                try:
+                    grid_fn(True)
+                except Exception:
+                    pass
+
+        legend_fn = getattr(plt, "legend", None)
+        if callable(legend_fn):
+            try:
+                legend_fn(True)
+            except TypeError:
+                try:
+                    legend_fn()
+                except Exception:
+                    pass
+
+        plt.show()
+    except Exception as exc:
+        print(
+            f"  {_YELLOW}[!] plotext rendering failed ({type(exc).__name__}: {exc}); "
+            "continuing without plot."
+            f"{_RESET}"
+        )
