@@ -74,7 +74,7 @@ from __future__ import annotations
 
 import warnings
 from dataclasses import dataclass
-from typing import Literal, Optional
+from typing import Any, Literal, Optional, TYPE_CHECKING
 
 import numpy as np
 import scipy.stats
@@ -83,6 +83,9 @@ from .paired import PairedDiffResult, PairwiseMatrix
 from .ranking import PointAdvantageResult, RankDistribution
 from .variance import RobustnessResult, SeedVarianceResult, robustness_metrics, seed_variance_decomposition
 from .stats_utils import correct_pvalues
+
+if TYPE_CHECKING:
+    import pandas as pd
 
 
 # ---------------------------------------------------------------------------
@@ -162,9 +165,9 @@ class FactorialLMMInfo:
     sigma_resid: float
     n_obs: int
     formula: str
-    factor_names: list
-    factor_tests: object   # pd.DataFrame
-    marginal_means: dict   # dict[str, pd.DataFrame]
+    factor_names: list[str]
+    factor_tests: "pd.DataFrame"
+    marginal_means: dict[str, "pd.DataFrame"]
     converged: bool = True
 
 
@@ -172,7 +175,7 @@ class FactorialLMMInfo:
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-def _require_pymer4():
+def _require_pymer4() -> Any:
     """Import and return ``pymer4.models.lmer``, or raise a helpful ImportError.
 
     pymer4 0.9+ uses Polars internally.  Its Polars→pandas bridge calls
@@ -203,7 +206,7 @@ def _require_pymer4():
     return lmer
 
 
-def _col_pl(df, candidates: list[str]) -> str:
+def _col_pl(df: Any, candidates: list[str]) -> str:
     """Return the first column name from *candidates* that exists in *df*.
 
     Handles minor API differences across pymer4 / R package versions.
@@ -223,7 +226,7 @@ def _scores_to_long_df(
     scores_2d: np.ndarray,
     template_labels: list[str],
     input_labels: list[str],
-):
+) -> Any:
     """Convert an ``(N, M)`` cell-mean score matrix to a long-form Polars DataFrame.
 
     Returns a Polars DataFrame with columns ``'template'``, ``'input'``,
@@ -247,7 +250,7 @@ def _scores_to_long_df(
     return df
 
 
-def _fit_lmm(df, lmer, template_labels: list[str]):
+def _fit_lmm(df: Any, lmer: Any, template_labels: list[str]) -> Any:
     """Fit ``score ~ template + (1|input)`` with Satterthwaite DFs.
 
     Uses REML estimation (better for variance components).  We call
@@ -265,7 +268,7 @@ def _fit_lmm(df, lmer, template_labels: list[str]):
     return model
 
 
-def _get_vcov(model) -> np.ndarray:
+def _get_vcov(model: Any) -> np.ndarray:
     """Extract the fixed-effects variance–covariance matrix as a numpy array.
 
     pymer4 0.9 does not expose ``model.vcov``; we call R's ``stats::vcov()``
@@ -280,7 +283,7 @@ def _get_vcov(model) -> np.ndarray:
     return np.array(mat_r)   # (N, N)
 
 
-def _extract_template_means(model, labels: list[str]) -> np.ndarray:
+def _extract_template_means(model: Any, labels: list[str]) -> np.ndarray:
     """Compute fitted marginal means for each template from treatment-coded LMM.
 
     With R's default treatment coding the first category is the reference:
@@ -301,7 +304,7 @@ def _extract_template_means(model, labels: list[str]) -> np.ndarray:
     return means
 
 
-def _t_crit_from_result_fit(model, alpha: float) -> float:
+def _t_crit_from_result_fit(model: Any, alpha: float) -> float:
     """Return the conservative t critical value from the fixed-effects DFs."""
     rf = model.result_fit
     df_col = next((c for c in ["df", "DF", "df_error", "Df", "Ddf"] if c in rf.columns), None)
@@ -317,7 +320,7 @@ def _t_crit_from_result_fit(model, alpha: float) -> float:
 # ---------------------------------------------------------------------------
 
 def _lmm_to_pairwise(
-    model,
+    model: Any,
     labels: list[str],
     cell_means_2d: np.ndarray,
     ci: float,
@@ -504,7 +507,7 @@ def _build_advantage_contrast_matrix(N: int, ref_idx: Optional[int]) -> np.ndarr
 
 
 def _lmm_to_mean_advantage(
-    model,
+    model: Any,
     labels: list[str],
     cell_means_2d: np.ndarray,
     ci: float,
@@ -593,7 +596,7 @@ def _lmm_to_mean_advantage(
 # Rank distribution
 # ---------------------------------------------------------------------------
 
-def _extract_variance_components(model) -> tuple[float, float]:
+def _extract_variance_components(model: Any) -> tuple[float, float]:
     """Return (sigma_input, sigma_resid) from the fitted LMM.
 
     In pymer4 0.9, ``model.ranef_var`` is a Polars DataFrame produced by
@@ -683,7 +686,7 @@ def _simulate_rank_dist(
 
 
 def _lmm_to_rank_dist(
-    model,
+    model: Any,
     labels: list[str],
     cell_means_2d: np.ndarray,
     n_sim: int,
@@ -700,7 +703,7 @@ def _lmm_to_rank_dist(
 # LMM diagnostics
 # ---------------------------------------------------------------------------
 
-def _build_lmm_info(model, n_obs: int) -> LMMInfo:
+def _build_lmm_info(model: Any, n_obs: int) -> LMMInfo:
     """Extract ``LMMInfo`` from a fitted pymer4 ``lmer`` model."""
     sigma_input, sigma_resid = _extract_variance_components(model)
 
@@ -732,7 +735,7 @@ def _build_lmm_info(model, n_obs: int) -> LMMInfo:
 # statsmodels backend
 # ---------------------------------------------------------------------------
 
-def _require_statsmodels():
+def _require_statsmodels() -> Any:
     """Import and return ``statsmodels.formula.api``, or raise a helpful ImportError."""
     try:
         import statsmodels.formula.api as smf  # type: ignore[import]
@@ -748,7 +751,7 @@ def _scores_to_long_df_pandas(
     scores_2d: np.ndarray,
     template_labels: list[str],
     input_labels: list[str],
-):
+) -> "pd.DataFrame":
     """Convert an ``(N, M)`` cell-mean score matrix to a long-form pandas DataFrame.
 
     Returns a DataFrame with columns ``'template'``, ``'input'``, ``'score'``.
@@ -780,7 +783,7 @@ def _sm_param_names(template_labels: list[str]) -> list[str]:
     return ["Intercept"] + [f"C(template)[T.{lbl}]" for lbl in template_labels[1:]]
 
 
-def _fit_lmm_sm(df_pandas, template_labels: list[str]):
+def _fit_lmm_sm(df_pandas: "pd.DataFrame", template_labels: list[str]) -> Any:
     """Fit ``score ~ C(template) + (1|input)`` via statsmodels MixedLM (REML).
 
     Returns a fitted ``MixedLMResults`` object.
@@ -790,7 +793,7 @@ def _fit_lmm_sm(df_pandas, template_labels: list[str]):
     return model.fit(reml=True, disp=False)
 
 
-def _extract_template_means_sm(sm_result, labels: list[str]) -> np.ndarray:
+def _extract_template_means_sm(sm_result: Any, labels: list[str]) -> np.ndarray:
     """Extract fitted marginal means from a statsmodels MixedLMResults object.
 
     With treatment coding (reference = ``labels[0]``):
@@ -809,7 +812,7 @@ def _extract_template_means_sm(sm_result, labels: list[str]) -> np.ndarray:
     return means
 
 
-def _get_vcov_sm(sm_result, template_labels: list[str]) -> np.ndarray:
+def _get_vcov_sm(sm_result: Any, template_labels: list[str]) -> np.ndarray:
     """Extract the fixed-effects covariance matrix as a numpy array ``(N, N)``.
 
     Slices ``result.cov_params()`` to the treatment-coding parameters
@@ -820,7 +823,7 @@ def _get_vcov_sm(sm_result, template_labels: list[str]) -> np.ndarray:
     return vcov_df.to_numpy()
 
 
-def _extract_variance_components_sm(sm_result) -> tuple[float, float]:
+def _extract_variance_components_sm(sm_result: Any) -> tuple[float, float]:
     """Return ``(sigma_input, sigma_resid)`` from a statsmodels MixedLMResults.
 
     ``result.cov_re`` is the random-effect covariance (1×1 for random intercepts);
@@ -835,7 +838,7 @@ def _extract_variance_components_sm(sm_result) -> tuple[float, float]:
 
 
 def _lmm_to_pairwise_sm(
-    sm_result,
+    sm_result: Any,
     labels: list[str],
     cell_means_2d: np.ndarray,
     ci: float,
@@ -939,7 +942,7 @@ def _lmm_to_pairwise_sm(
 
 
 def _lmm_to_mean_advantage_sm(
-    sm_result,
+    sm_result: Any,
     labels: list[str],
     cell_means_2d: np.ndarray,
     ci: float,
@@ -998,7 +1001,7 @@ def _lmm_to_mean_advantage_sm(
     )
 
 
-def _build_lmm_info_sm(sm_result, n_obs: int) -> LMMInfo:
+def _build_lmm_info_sm(sm_result: Any, n_obs: int) -> LMMInfo:
     """Extract ``LMMInfo`` from a fitted statsmodels ``MixedLMResults``."""
     sigma_input, sigma_resid = _extract_variance_components_sm(sm_result)
 
@@ -1023,7 +1026,7 @@ def _build_lmm_info_sm(sm_result, n_obs: int) -> LMMInfo:
 # Factorial LMM — statsmodels backend
 # ---------------------------------------------------------------------------
 
-def _build_factorial_formula(factor_names: list) -> str:
+def _build_factorial_formula(factor_names: list[str]) -> str:
     """Build ``score ~ C(F1) * C(F2) * ... + (1|input)`` formula string.
 
     The ``*`` expansion yields all main effects and interactions.
@@ -1036,10 +1039,10 @@ def _build_factorial_formula(factor_names: list) -> str:
 
 def _scores_to_long_df_factorial_pandas(
     scores_2d: np.ndarray,
-    template_labels: list,
-    input_labels: list,
-    template_factors,  # pd.DataFrame
-):
+    template_labels: list[str],
+    input_labels: list[str],
+    template_factors: "pd.DataFrame",
+) -> "pd.DataFrame":
     """Build a long-form pandas DataFrame with factor columns appended.
 
     Calls :func:`_scores_to_long_df_pandas` then left-joins the factor
@@ -1057,7 +1060,7 @@ def _scores_to_long_df_factorial_pandas(
     return df
 
 
-def _get_fe_vcov_sm(sm_result) -> np.ndarray:
+def _get_fe_vcov_sm(sm_result: Any) -> np.ndarray:
     """Return the fixed-effect-only covariance matrix from a statsmodels MixedLMResults.
 
     ``sm_result.cov_params()`` includes both fixed-effect and random-effect
@@ -1068,7 +1071,7 @@ def _get_fe_vcov_sm(sm_result) -> np.ndarray:
     return sm_result.cov_params().loc[fe_names, fe_names].to_numpy()
 
 
-def _fit_factorial_lmm_sm(df_pandas, factor_names: list):
+def _fit_factorial_lmm_sm(df_pandas: "pd.DataFrame", factor_names: list[str]) -> tuple[Any, str]:
     """Fit ``score ~ C(F1) * C(F2) * ... + (1|input)`` via statsmodels MixedLM.
 
     Returns ``(sm_result, formula_str)``.
@@ -1080,9 +1083,9 @@ def _fit_factorial_lmm_sm(df_pandas, factor_names: list):
 
 
 def _get_template_design_vectors(
-    sm_result,
-    df_pandas,
-    labels: list,
+    sm_result: Any,
+    df_pandas: "pd.DataFrame",
+    labels: list[str],
 ) -> np.ndarray:
     """Return ``(N, P)`` matrix: row i = mean design vector for template i.
 
@@ -1107,7 +1110,7 @@ def _get_template_design_vectors(
     return design_vecs
 
 
-def _extract_factor_tests_sm(sm_result, factor_names: list):
+def _extract_factor_tests_sm(sm_result: Any, factor_names: list[str]) -> "pd.DataFrame":
     """Return a DataFrame of Wald tests per model term (main effects + interactions).
 
     Uses ``sm_result.wald_test_terms()`` which tests H₀: all coefficients for
@@ -1126,7 +1129,7 @@ def _extract_factor_tests_sm(sm_result, factor_names: list):
         table = wt.table.copy()
 
         # Normalise column names (statsmodels uses 'statistic', 'pvalue', 'df_constraint').
-        col_map: dict = {}
+        col_map: dict[str, str] = {}
         for col in table.columns:
             lc = col.lower().replace(" ", "").replace("_", "").replace("-", "")
             if lc == "statistic" or "fstat" in lc or "chi2" in lc:
@@ -1145,7 +1148,7 @@ def _extract_factor_tests_sm(sm_result, factor_names: list):
             pval = row.get("p_value", float("nan"))
             df_c = row.get("df", float("nan"))
             # Unwrap numpy arrays of any shape to a scalar float.
-            def _scalar(v):
+            def _scalar(v: Any) -> float:
                 try:
                     import numpy as _np
                     return float(_np.asarray(v).flat[0])
@@ -1167,11 +1170,11 @@ def _extract_factor_tests_sm(sm_result, factor_names: list):
 
 
 def _extract_marginal_means_sm(
-    sm_result,
-    df_pandas,
-    factor_names: list,
+    sm_result: Any,
+    df_pandas: "pd.DataFrame",
+    factor_names: list[str],
     ci: float,
-) -> dict:
+) -> dict[str, "pd.DataFrame"]:
     """Estimated marginal means per factor from a fitted factorial LMM.
 
     For each focal factor F, the EMM for level ℓ is the prediction at
@@ -1194,7 +1197,7 @@ def _extract_marginal_means_sm(
     vcov  = _get_fe_vcov_sm(sm_result)     # (P, P)
     tmpl_col = df_pandas["template"].values
 
-    emm_per_factor: dict = {}
+    emm_per_factor: dict[str, "pd.DataFrame"] = {}
 
     for focal in factor_names:
         other = [f for f in factor_names if f != focal]
@@ -1240,12 +1243,12 @@ def _extract_marginal_means_sm(
 
 
 def _build_factorial_lmm_info_sm(
-    sm_result,
-    factor_names: list,
+    sm_result: Any,
+    factor_names: list[str],
     n_obs: int,
     formula: str,
     ci: float,
-    df_pandas,
+    df_pandas: "pd.DataFrame",
 ) -> "FactorialLMMInfo":
     """Build a ``FactorialLMMInfo`` from a fitted statsmodels MixedLMResults."""
     sigma_input, sigma_resid = _extract_variance_components_sm(sm_result)
@@ -1276,9 +1279,9 @@ def _build_factorial_lmm_info_sm(
 
 
 def _lmm_to_pairwise_factorial_sm(
-    sm_result,
-    labels: list,
-    df_pandas,
+    sm_result: Any,
+    labels: list[str],
+    df_pandas: "pd.DataFrame",
     cell_means_2d: np.ndarray,
     ci: float,
     correction: str,
@@ -1298,8 +1301,8 @@ def _lmm_to_pairwise_factorial_sm(
     df_val      = float(sm_result.df_resid)
     t_crit      = float(scipy.stats.t.ppf(1 - alpha / 2, df=df_val))
 
-    results: dict = {}
-    pairs:   list = []
+    results: dict[tuple[str, str], PairedDiffResult] = {}
+    pairs: list[tuple[str, str]] = []
 
     for idx_a in range(N):
         for idx_b in range(idx_a + 1, N):
@@ -1363,12 +1366,12 @@ def _lmm_to_pairwise_factorial_sm(
 
 
 def _lmm_to_mean_advantage_factorial_sm(
-    sm_result,
-    labels: list,
-    df_pandas,
+    sm_result: Any,
+    labels: list[str],
+    df_pandas: "pd.DataFrame",
     cell_means_2d: np.ndarray,
     ci: float,
-    spread_percentiles: tuple,
+    spread_percentiles: tuple[float, float],
     reference: str,
 ) -> PointAdvantageResult:
     """Mean advantages for a factorial LMM via the delta method.
@@ -1434,16 +1437,23 @@ def _lmm_to_mean_advantage_factorial_sm(
 
 
 def _lmm_analyze_factorial_sm(
-    result,
+    result: Any,
     *,
     reference: str,
     ci: float,
     correction: str,
-    spread_percentiles: tuple,
+    spread_percentiles: tuple[float, float],
     failure_threshold: Optional[float],
     n_sim: int,
     rng: np.random.Generator,
-):
+) -> tuple[
+    PairwiseMatrix,
+    PointAdvantageResult,
+    RankDistribution,
+    RobustnessResult,
+    Optional[SeedVarianceResult],
+    FactorialLMMInfo,
+]:
     """Full factorial LMM pipeline (statsmodels backend only).
 
     Fits ``score ~ C(F1) * C(F2) * ... + (1|input)`` on cell-mean scores
@@ -1502,7 +1512,7 @@ def _lmm_analyze_factorial_sm(
 # ---------------------------------------------------------------------------
 
 def lmm_analyze(
-    result,
+    result: Any,
     *,
     backend: Literal["statsmodels", "pymer4"] = "statsmodels",
     reference: str = "grand_mean",

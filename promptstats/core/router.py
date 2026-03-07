@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Dict, Literal, Mapping, Optional, Union
 
 import numpy as np
+import pandas as pd
 
 from .types import BenchmarkResult, MultiModelBenchmark
 from .paired import PairwiseMatrix, all_pairwise
@@ -476,7 +477,7 @@ def analyze(
 # ---------------------------------------------------------------------------
 
 def analyze_factorial(
-    data: "pd.DataFrame",
+    data: pd.DataFrame,
     factors: list[str],
     random_effect: str = "input_id",
     score_col: str = "score",
