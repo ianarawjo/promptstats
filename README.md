@@ -14,8 +14,6 @@ The idea is simple: you give `promptstats` your benchmark data, and it runs stat
 - Plots and tests comparing model performance across prompt variations
 - Constraints that guide you into performing best practices, like always considering prompt sensitivity when benchmarking model performance
 
-**How does this differ from ChainForge?** I aim to integrate `promptstats` with ChainForge in a future release. 
-
 ## Sample output
 
 Running `pstats.analyze()` and then `pstats.print_analysis_summary(analysis)` prints a full statistical report to the terminal, including confidence interval line plots, pairwise comparisons between prompt templates, and per-input stability across runs (how stable the model is across multiple runs for the same input). Below is example excerpt from an analysis of a 4-template sentiment-classification benchmark (GPT-4.1-nano, 27 inputs, 3 runs, 3 evaluators):
@@ -53,7 +51,7 @@ The specific statistical tests the `promptstats.analyze()` method runs are:
 
 If your benchmark includes repeated runs (`R >= 3`), bootstrap-based analyses above use a **two-level nested bootstrap** (resample inputs, then runs within each input) so run-to-run stochasticity is propagated into CIs and rankings. In that case, `analyze()` also returns a seed/input variance decomposition via `seed_variance_decomposition(...)`.
 
-If you explicitly set `method="lmm"` (optional, requires `pymer4` + R), `analyze()` switches to a mixed-effects path (`score ~ template + (1|input)`) with Wald CIs and emmeans-based pairwise contrasts.
+If you set `method="lmm"`, `analyze()` switches to a mixed-effects path (`score ~ template + (1|input)`) with Wald CIs and parametric rank distributions. By default this uses `statsmodels` (pure Python, no additional setup required); pass `backend="pymer4"` to use R's lme4/emmeans instead (requires a separate R installation — see below).
 
 ## Installation and Quick start CLI
 
@@ -81,7 +79,7 @@ promptstats analyze results.csv
 
 The input file should have columns `template`, `input`, and `score` (run and evaluator columns are optional). Run `promptstats analyze --help` for the full list of options and supported column aliases.
 
-For more complex statistical analysis with mixed effects models, see below for install instructions. R and pymer4 are required dependencies.
+For more complex statistical analysis with mixed effects models, use `method="lmm"`. The default `statsmodels` backend works out of the box; for the optional R-based backend, see below.
 
 ## Python API
 
@@ -201,21 +199,37 @@ python examples/sentiment_manual_api_calls.py
 
 OpenAI-powered examples require `OPENAI_API_KEY` set in your environment. But, you can easily swap out the model calls to whatever model you prefer. 
 
-## Optional: Complex statistical analysis with mixed effects models
+## Mixed effects models (LMM)
 
 > [!IMPORTANT]
-> Mixed effects analysis is experimental, and currently offers only the advantage of gracefully 
+> Mixed effects analysis is experimental, and currently offers only the advantage of gracefully
 > dealing with missing data. In the future, we plan to add factor decomposition across multiple inputs.
-> We recommend only installing this if you absolutely need robustness to missing data (`NaN`). Keep 
+> We recommend only using `method="lmm"` if you need robustness to missing data (`NaN`). Keep
 > in mind that missing data must be reasonably random (i.e., like sampling from a larger distribution).
 
-`promptstats` can support more complex analyses for:
+`promptstats` supports mixed-effects models (`score ~ template + (1|input)`) for:
 - Missing data in inputs (some score cells are `NaN`)
 - Factor decomposition when multiple input factors are present
 
-For mixed-effects models, `promptstats` relies on `pymer4`, which wraps R's `lmer` and `emmeans` functions. We chose `pymer4` because it offers strong forward compatibility for more advanced statistical methods, many of which are most robustly supported (or only available) in R.
+### Default backend: statsmodels (pure Python)
 
-`pymer4` is an optional dependency and will require additional system setup, outside of Python itself. On macOS, installation involved the following steps. In R, install packages:
+No extra setup required — `statsmodels` is included in the standard `pip install promptstats`. Simply pass `method="lmm"`:
+
+```python
+analysis = pstats.analyze(result, method="lmm")
+```
+
+`promptstats` fits the model with REML, computes Wald CIs via the delta method, and estimates rank distributions by parametric simulation.
+
+### Optional backend: pymer4 (requires R)
+
+For Satterthwaite degrees of freedom and `emmeans`-based pairwise contrasts (R's gold standard for mixed models), pass `backend="pymer4"`:
+
+```python
+analysis = pstats.analyze(result, method="lmm", backend="pymer4")
+```
+
+This requires a working R installation with the following packages:
 
 ```r
 install.packages(c(
@@ -229,7 +243,7 @@ install.packages(c(
 ))
 ```
 
-In Python, install the packaged LMM extra:
+Then install the Python LMM extra:
 
 ```bash
 pip install "promptstats[lmm]"
@@ -237,7 +251,7 @@ pip install "promptstats[lmm]"
 
 > [!NOTE]
 > If your environment needs manual dependency pinning, this is the tested equivalent:
-> 
+>
 > ```bash
 > pip install "pymer4>=0.9" great_tables joblib rpy2 polars scikit-learn formulae pyarrow
 > ```
@@ -251,6 +265,8 @@ We aim to continue to contribute to `promptstats`. Ideas for future features:
 - A default "report" mode that outputs a PDF summarizing findings and diving into the details
 - Integration with ChainForge as a front-end, to bring statistical analyses to plotted evals
 - Help developers quantify the "semantic variance" of the provided prompt templates, and perhaps even factor this into the calculation in an intelligent way. This is important because the current implementation doesn't know about the diversity/representativity of the input dataset and prompts. 
+
+**How does this differ from ChainForge?** I aim to integrate `promptstats` with ChainForge in a future release. 
 
 ## Development
 
