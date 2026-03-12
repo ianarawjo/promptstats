@@ -28,6 +28,7 @@ from .resampling import (
     bootstrap_diffs_nested,
     bootstrap_means_1d,
     resolve_resampling_method,
+    newcombe_paired_ci,
     _stat,
 )
 from .stats_utils import correct_pvalues
@@ -72,6 +73,29 @@ def _wilcoxon_signed_rank_p(diffs: np.ndarray) -> Optional[float]:
         return float(result.pvalue)
     except ValueError:
         return None
+
+
+def _mcnemar_p(values_a: np.ndarray, values_b: np.ndarray) -> float:
+    """Exact two-sided McNemar p-value for paired binary data.
+
+    Under H0 (no difference), n10 ~ Binomial(m, 0.5) where m = n10 + n01 is
+    the number of discordant pairs.  The two-sided p-value is
+    ``2 * P(X ≤ min(n10, n01))`` clamped to [0, 1].
+
+    Returns 1.0 when m == 0 (perfect agreement, no discordant pairs).
+    """
+    from scipy.stats import binom
+
+    a_bin = (values_a >= 0.5).astype(int)
+    b_bin = (values_b >= 0.5).astype(int)
+    n10 = int(np.sum((a_bin == 1) & (b_bin == 0)))
+    n01 = int(np.sum((a_bin == 0) & (b_bin == 1)))
+    m = n10 + n01
+    if m == 0:
+        return 1.0
+    k = min(n10, n01)
+    p = float(2.0 * binom.cdf(k, m, 0.5))
+    return min(p, 1.0)
 
 
 @dataclass
@@ -261,7 +285,7 @@ def pairwise_differences(
     idx_b: int,
     label_a: str = "A",
     label_b: str = "B",
-    method: Literal["bootstrap", "bca", "bayes_bootstrap", "smooth_bootstrap", "auto"] = "auto",
+    method: Literal["bootstrap", "bca", "bayes_bootstrap", "smooth_bootstrap", "auto", "newcombe"] = "auto",
     ci: float = 0.95,
     n_bootstrap: int = 10_000,
     rng: Optional[np.random.Generator] = None,
@@ -282,9 +306,10 @@ def pairwise_differences(
         Human-readable labels for the templates.
     method : str
         Statistical method: ``'auto'`` (default), ``'bootstrap'``, ``'bca'``,
-        ``'bayes_bootstrap'`` (Bayesian bootstrap), or ``'smooth_bootstrap'``
-        (smoothed bootstrap via Gaussian KDE).  ``'auto'`` selects
-        ``'smooth_bootstrap'``.
+        ``'bayes_bootstrap'`` (Bayesian bootstrap), ``'smooth_bootstrap'``
+        (smoothed bootstrap via Gaussian KDE), or ``'newcombe'`` for paired
+        binary (0/1) data using Newcombe CI + exact McNemar p-value.
+        ``'auto'`` selects ``'smooth_bootstrap'``.
     ci : float
         Confidence level for the interval (default 0.95).
     n_bootstrap : int
@@ -301,6 +326,45 @@ def pairwise_differences(
     """
     if rng is None:
         rng = np.random.default_rng()
+
+    # ------------------------------------------------------------------ #
+    # Newcombe path for paired binary (0/1) data                         #
+    # ------------------------------------------------------------------ #
+    if method == "newcombe":
+        # When R >= 3 the cell means are proportions, not binary values.
+        # Fall back to smooth bootstrap for the seeded nested path.
+        if scores.ndim == 3 and scores.shape[2] >= 3:
+            return _pairwise_diffs_seeded(
+                scores, idx_a, idx_b, label_a, label_b,
+                method="smooth_bootstrap", ci=ci, n_bootstrap=n_bootstrap,
+                rng=rng, statistic=statistic,
+            )
+        flat = scores.mean(axis=2) if scores.ndim == 3 else scores
+        values_a = flat[idx_a]
+        values_b = flat[idx_b]
+        diffs = values_a - values_b
+        m = len(diffs)
+        point_d = _stat(diffs, statistic)
+        std_d = float(np.std(diffs, ddof=1))
+        alpha_val = 1.0 - ci
+        ci_low, ci_high = newcombe_paired_ci(values_a, values_b, alpha_val)
+        p_value = _mcnemar_p(values_a, values_b)
+        wilcoxon_p = _wilcoxon_signed_rank_p(diffs)
+        return PairedDiffResult(
+            template_a=label_a,
+            template_b=label_b,
+            point_diff=point_d,
+            std_diff=std_d,
+            ci_low=ci_low,
+            ci_high=ci_high,
+            p_value=p_value,
+            test_method="newcombe (mcnemar p-value)",
+            n_inputs=m,
+            per_input_diffs=diffs,
+            n_runs=1,
+            statistic=statistic,
+            wilcoxon_p=wilcoxon_p,
+        )
 
     # ------------------------------------------------------------------ #
     # Route: seeded (R >= 3) vs. standard (2-D or R < 3)                 #
@@ -526,7 +590,7 @@ def _pairwise_diffs_seeded(
 def all_pairwise(
     scores: np.ndarray,
     labels: list[str],
-    method: Literal["bootstrap", "bca", "bayes_bootstrap", "smooth_bootstrap", "auto"] = "auto",
+    method: Literal["bootstrap", "bca", "bayes_bootstrap", "smooth_bootstrap", "auto", "newcombe"] = "auto",
     ci: float = 0.95,
     n_bootstrap: int = 10_000,
     correction: Literal["holm", "bonferroni", "fdr_bh", "none"] = "holm",
@@ -625,7 +689,7 @@ def vs_baseline(
     scores: np.ndarray,
     labels: list[str],
     baseline: str,
-    method: Literal["bootstrap", "bca", "bayes_bootstrap", "smooth_bootstrap", "auto"] = "auto",
+    method: Literal["bootstrap", "bca", "bayes_bootstrap", "smooth_bootstrap", "auto", "newcombe"] = "auto",
     ci: float = 0.95,
     n_bootstrap: int = 10_000,
     correction: Literal["holm", "bonferroni", "fdr_bh", "none"] = "holm",

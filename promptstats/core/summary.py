@@ -448,12 +448,15 @@ def _print_cross_model_executive_summary(bundle: MultiModelBundle) -> None:
     ci_w = 15
 
     _print_subsection("--- Executive Summary (Cross-model pair leaderboard) ---")
+    _cross_ci_header = (
+        "Wilson CI" if cross.point_advantage.n_bootstrap == 0 else "Bootstrap CI"
+    )
     header = (
         f"  {'Model':<{model_w}s}"
         f"  {'Template':<{template_w}s}"
         f"  {'Grp':^{grp_w}s}"
         f"  {'Mean':>{mean_w}s}"
-        f"  {'Bootstrap CI':<{ci_w}s}"
+        f"  {_cross_ci_header:<{ci_w}s}"
         "  Verdict"
     )
     sep = "  " + "─" * (len(header) - 2)
@@ -564,7 +567,9 @@ def _print_bundle_summary(
     print()
 
     stat_label = bundle.point_advantage.statistic.capitalize()
-    _print_subsection(f"--- {stat_label} Advantage (reference={bundle.point_advantage.reference}) ---")
+    is_wilson_adv = bundle.point_advantage.n_bootstrap == 0
+    _adv_ci_note = "Wilson CIs" if is_wilson_adv else "Bootstrap CIs"
+    _print_subsection(f"--- {stat_label} Advantage (reference={bundle.point_advantage.reference}, {_adv_ci_note}) ---")
     low_p, high_p = bundle.point_advantage.spread_percentiles
     ma = bundle.point_advantage
     ma_max_abs = max(
@@ -618,6 +623,14 @@ def _print_bundle_summary(
     # Determine statistic label from the first result (all share the same statistic).
     first_result = next(iter(bundle.pairwise.results.values()), None)
     pair_stat_label = first_result.statistic.capitalize() if first_result else "Mean"
+    # Detect newcombe (binary) path: p_value column holds McNemar, not bootstrap p.
+    is_newcombe_pairwise = (
+        first_result is not None
+        and "newcombe" in first_result.test_method.lower()
+    )
+    p_first_header = "p (McNemar)" if is_newcombe_pairwise else "p (boot)"
+    if is_newcombe_pairwise:
+        pair_p_boot_col_width = max(pair_p_boot_col_width, len(p_first_header))
     _print_subsection("--- Pairwise Comparisons (lowest p-value first) ---")
     pair_results = sorted(
         bundle.pairwise.results.values(),
@@ -658,7 +671,7 @@ def _print_bundle_summary(
             f"{pair_stat_label:>{pair_stat_col_width}s} "
             f"{'CI Low':>{pair_ci_col_width}s} {'CI High':>{pair_ci_col_width}s} "
             f"{'r_rb':>{pair_sigma_col_width}s} "
-            f"{'p (boot)':>{pair_p_boot_col_width}s} {'p (wsr)':>{pair_p_wsr_col_width}s} {'p (nem)':>{pair_p_nem_col_width}s}"
+            f"{p_first_header:>{pair_p_boot_col_width}s} {'p (wsr)':>{pair_p_wsr_col_width}s} {'p (nem)':>{pair_p_nem_col_width}s}"
         )
 
     for result in pair_results[:max_pairs]:
@@ -698,9 +711,16 @@ def _print_bundle_summary(
         print("  (no pairwise comparisons)")
     elif max_pairs > 0:
         print(f"  r_rb = rank biserial correlation (effect size: small≈0.1, medium≈0.3, large≈0.5)")
-        print(f"  p (boot) = bootstrap {bundle.pairwise.correction_method}-corrected; "
-              f"p (wsr) = Wilcoxon signed-rank {bundle.pairwise.correction_method}-corrected; "
-              f"p (nem) = Nemenyi post-hoc (Friedman-based, FWER-controlled)")
+        if is_newcombe_pairwise:
+            print(
+                f"  p (McNemar) = McNemar exact test (two-sided, uncorrected); "
+                f"p (wsr) = Wilcoxon signed-rank {bundle.pairwise.correction_method}-corrected; "
+                f"p (nem) = Nemenyi post-hoc (Friedman-based, FWER-controlled)"
+            )
+        else:
+            print(f"  p (boot) = bootstrap {bundle.pairwise.correction_method}-corrected; "
+                  f"p (wsr) = Wilcoxon signed-rank {bundle.pairwise.correction_method}-corrected; "
+                  f"p (nem) = Nemenyi post-hoc (Friedman-based, FWER-controlled)")
         print("  stars: * p<0.05, ** p<0.01, *** p<0.001")
         print()
         labels_sorted = [
@@ -1800,12 +1820,15 @@ def _print_executive_summary(
     ci_w = 15  # e.g. "[0.950, 0.990]" = 14 chars + 1 padding
     stab_w = 16
 
+    # CI column header: Wilson CI when no bootstrap was used (binary data path).
+    ci_col_header = "Wilson CI" if bundle.point_advantage.n_bootstrap == 0 else "Bootstrap CI"
+
     # Header row (no ANSI codes so widths match exactly).
     header_parts = [
         f"  {item_title:<{tpl_w}s}",
         f"  {'Grp':^{grp_w}s}",
         f"  {'Mean':>{mean_w}s}",
-        f"  {'Bootstrap CI':<{ci_w}s}",
+        f"  {ci_col_header:<{ci_w}s}",
     ]
     if has_stability:
         header_parts.append(f"  {'Stability':<{stab_w}s}")

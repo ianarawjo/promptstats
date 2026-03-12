@@ -687,15 +687,26 @@ def _analyze_single(
     run_scores = result.get_run_scores()   # (N, M, R) or (N, M, 1)
     labels = result.template_labels
 
+    # Auto-detect binary (0/1) evaluation data when method='auto'.
+    # Switch to Newcombe score intervals for pairwise comparisons and
+    # Wilson score intervals for single-sample advantage CIs.
+    pairwise_method = method
+    advantage_method = method
+    if method == "auto":
+        from .resampling import is_binary_scores
+        if is_binary_scores(run_scores):
+            pairwise_method = "newcombe"
+            advantage_method = "wilson"
+
     pairwise = all_pairwise(
         run_scores, labels,
-        method=method, ci=ci, n_bootstrap=n_bootstrap,
+        method=pairwise_method, ci=ci, n_bootstrap=n_bootstrap,
         correction=correction, rng=rng, statistic=statistic,
     )
     mean_adv = bootstrap_point_advantage(
         run_scores, labels,
         reference=reference,
-        method=method, ci=ci, n_bootstrap=n_bootstrap,
+        method=advantage_method, ci=ci, n_bootstrap=n_bootstrap,
         spread_percentiles=spread_percentiles, rng=rng, statistic=statistic,
     )
     robustness = robustness_metrics(

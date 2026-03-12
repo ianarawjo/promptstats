@@ -110,6 +110,130 @@ def _inner_resample_cell_means(
     return resampled.mean(axis=2)                                 # (N, M)
 
 
+def is_binary_scores(scores: np.ndarray) -> bool:
+    """Return True if all finite values in *scores* are exactly 0 or 1.
+
+    Used to auto-detect binary evaluation data so that :func:`analyze` can
+    switch to Wilson score intervals (single-sample) and Newcombe score
+    intervals (pairwise) rather than the default smooth bootstrap.
+
+    Parameters
+    ----------
+    scores : np.ndarray
+        Any-shape score array.
+
+    Returns
+    -------
+    bool
+    """
+    flat = scores.ravel()
+    finite = flat[np.isfinite(flat)]
+    if len(finite) == 0:
+        return False
+    return bool(np.all((finite == 0.0) | (finite == 1.0)))
+
+
+def wilson_ci(successes: int, n: int, alpha: float) -> tuple[float, float]:
+    """Wilson score confidence interval for a binomial proportion.
+
+    Parameters
+    ----------
+    successes : int
+        Number of successes (observations equal to 1).
+    n : int
+        Total number of trials.
+    alpha : float
+        Significance level (1 − confidence level).  E.g. 0.05 for a 95% CI.
+
+    Returns
+    -------
+    (ci_low, ci_high) : tuple[float, float]
+        Interval clamped to [0, 1].
+    """
+    if n <= 0:
+        return (0.0, 0.0)
+    p_hat = successes / n
+    z = float(stats.norm.ppf(1.0 - alpha / 2.0))
+    z2 = z * z
+    denom = 1.0 + z2 / n
+    center = (p_hat + z2 / (2.0 * n)) / denom
+    radius = (z / denom) * np.sqrt(
+        (p_hat * (1.0 - p_hat) / n) + (z2 / (4.0 * n * n))
+    )
+    return (max(0.0, float(center - radius)), min(1.0, float(center + radius)))
+
+
+def wilson_ci_1d(values: np.ndarray, alpha: float) -> tuple[float, float]:
+    """Wilson score CI for a 1-D binary (0/1) array.
+
+    Parameters
+    ----------
+    values : np.ndarray
+        1-D array of binary observations (should contain only 0s and 1s).
+    alpha : float
+        Significance level (1 − confidence level).
+
+    Returns
+    -------
+    (ci_low, ci_high) : tuple[float, float]
+    """
+    n = len(values)
+    successes = int(np.round(np.sum(values)))
+    return wilson_ci(successes, n, alpha)
+
+
+def newcombe_paired_ci(
+    values_a: np.ndarray,
+    values_b: np.ndarray,
+    alpha: float,
+) -> tuple[float, float]:
+    """Newcombe score CI for the paired binary difference p(A=1) − p(B=1).
+
+    Uses the discordant-pairs formulation (Newcombe 1998, *Stat Med*).
+    Let n10 = number of inputs where A=1, B=0, and n01 = A=0, B=1.
+    A Wilson score interval is computed for theta = n10 / (n10 + n01)
+    (proportion of discordant pairs where A wins), then transformed to
+    the difference scale::
+
+        d_low  = (m / n) * (2 * theta_low  − 1)
+        d_high = (m / n) * (2 * theta_high − 1)
+
+    where m = n10 + n01 is the number of discordant pairs and n is the
+    total number of paired inputs.
+
+    Returns (0.0, 0.0) when m == 0 (no discordant pairs, perfect agreement).
+
+    Parameters
+    ----------
+    values_a, values_b : np.ndarray
+        1-D arrays of equal length.  Values are thresholded at 0.5 to
+        determine binary membership (accommodates float representations).
+    alpha : float
+        Significance level (1 − confidence level).
+
+    Returns
+    -------
+    (ci_low, ci_high) : tuple[float, float]
+        CI on p(A=1) − p(B=1).
+    """
+    n = len(values_a)
+    if n <= 0:
+        return (0.0, 0.0)
+    a_bin = (values_a >= 0.5).astype(int)
+    b_bin = (values_b >= 0.5).astype(int)
+    n10 = int(np.sum((a_bin == 1) & (b_bin == 0)))
+    n01 = int(np.sum((a_bin == 0) & (b_bin == 1)))
+    m = n10 + n01
+    if m == 0:
+        return (0.0, 0.0)
+    theta_low, theta_high = wilson_ci(n10, m, alpha)
+    scale = m / n
+    return (
+        float(scale * (2.0 * theta_low - 1.0)),
+        float(scale * (2.0 * theta_high - 1.0)),
+    )
+
+
 def resolve_resampling_method(
     method: Literal["bootstrap", "bca", "bayes_bootstrap", "smooth_bootstrap", "auto"],
     sample_size: int,

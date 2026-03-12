@@ -28,6 +28,8 @@ from .resampling import (
     bootstrap_means_1d,
     nested_resample_cell_means_once,
     resolve_resampling_method,
+    wilson_ci_1d,
+    newcombe_paired_ci,
 )
 
 
@@ -380,7 +382,7 @@ def bootstrap_point_advantage(
     ci: float = 0.95,
     spread_percentiles: tuple[float, float] = (10, 90),
     rng: Optional[np.random.Generator] = None,
-    method: Literal["bootstrap", "bca", "bayes_bootstrap", "smooth_bootstrap", "auto"] = "auto",
+    method: Literal["bootstrap", "bca", "bayes_bootstrap", "smooth_bootstrap", "auto", "wilson"] = "auto",
     statistic: Literal["mean", "median"] = "mean",
 ) -> PointAdvantageResult:
     """Compute point advantage over a reference with dual uncertainty bands.
@@ -426,6 +428,27 @@ def bootstrap_point_advantage(
     """
     if rng is None:
         rng = np.random.default_rng()
+
+    # ------------------------------------------------------------------ #
+    # Wilson path for binary (0/1) data                                   #
+    # ------------------------------------------------------------------ #
+    if method == "wilson":
+        # When R >= 3 the per-run cell means are no longer binary values;
+        # fall back to smooth bootstrap for the seeded nested path.
+        if scores.ndim == 3 and scores.shape[2] >= 3:
+            return _smooth_bootstrap_point_advantage_seeded(
+                scores, labels,
+                reference=reference, n_bootstrap=n_bootstrap,
+                ci=ci, spread_percentiles=spread_percentiles,
+                rng=rng, statistic=statistic,
+            )
+        flat = scores.mean(axis=2) if scores.ndim == 3 else scores
+        return _wilson_point_advantage(
+            flat, labels,
+            reference=reference,
+            alpha=1.0 - ci,
+            spread_percentiles=spread_percentiles,
+        )
 
     # ------------------------------------------------------------------ #
     # Seeded path (R >= 3)                                                #
@@ -793,4 +816,86 @@ def _smooth_bootstrap_point_advantage_seeded(
         n_bootstrap=n_bootstrap,
         spread_percentiles=spread_percentiles,
         statistic=statistic,
+    )
+
+
+def _wilson_point_advantage(
+    scores: np.ndarray,
+    labels: list[str],
+    *,
+    reference: str,
+    alpha: float,
+    spread_percentiles: tuple[float, float],
+) -> PointAdvantageResult:
+    """Wilson score CIs for per-template binary success rates, shifted by reference.
+
+    For the grand-mean reference, computes a Wilson CI on each template's raw
+    success proportion and shifts it by the grand-mean proportion.
+
+    For a specific template reference, uses the Newcombe paired score interval
+    between each template and the reference, equivalent to the CI on p_i − p_ref.
+
+    Parameters
+    ----------
+    scores : np.ndarray
+        Shape ``(N, M)`` with binary (0/1) per-input scores.
+    labels : list[str]
+        Template labels.
+    reference : str
+        ``'grand_mean'`` or a template label.
+    alpha : float
+        Significance level (1 − confidence level).
+    spread_percentiles : tuple[float, float]
+        Percentiles for the intrinsic variance band.
+
+    Returns
+    -------
+    PointAdvantageResult
+        ``n_bootstrap`` is 0 (no bootstrap was used).
+    """
+    n_templates, m_inputs = scores.shape
+
+    if reference == "grand_mean":
+        ref_scores = scores.mean(axis=0)   # (M,) per-input grand mean
+        ref_label = "grand_mean"
+        ref_idx = None
+        grand_mean_p = float(ref_scores.mean())
+    else:
+        ref_idx = labels.index(reference)
+        ref_scores = scores[ref_idx]       # (M,) raw binary scores for reference template
+        ref_label = reference
+
+    advantages = scores - ref_scores[np.newaxis, :]   # (N, M)
+    point_adv = advantages.mean(axis=1)                # (N,) — always mean for proportions
+    spread_low = np.percentile(advantages, spread_percentiles[0], axis=1)
+    spread_high = np.percentile(advantages, spread_percentiles[1], axis=1)
+
+    ci_low = np.empty(n_templates)
+    ci_high = np.empty(n_templates)
+
+    if reference == "grand_mean":
+        for i in range(n_templates):
+            w_low, w_high = wilson_ci_1d(scores[i], alpha)
+            ci_low[i] = w_low - grand_mean_p
+            ci_high[i] = w_high - grand_mean_p
+    else:
+        for i in range(n_templates):
+            if i == ref_idx:
+                ci_low[i] = 0.0
+                ci_high[i] = 0.0
+            else:
+                ci_low[i], ci_high[i] = newcombe_paired_ci(scores[i], ref_scores, alpha)
+
+    return PointAdvantageResult(
+        labels=labels,
+        point_advantages=point_adv,
+        bootstrap_ci_low=ci_low,
+        bootstrap_ci_high=ci_high,
+        spread_low=spread_low,
+        spread_high=spread_high,
+        reference=ref_label,
+        per_input_advantages=advantages,
+        n_bootstrap=0,
+        spread_percentiles=spread_percentiles,
+        statistic="mean",
     )
