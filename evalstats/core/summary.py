@@ -1385,6 +1385,8 @@ def _prepare_unpaired_pairwise_rows(
             "p_value": p.p_value,
             "display_p": p.p_value if show_p else None,
             "multi_ci": None,
+            "rho2": p.rho2,
+            "n_eff": p.n_eff,
         }
         rows.append(row)
 
@@ -1406,6 +1408,7 @@ def _prepare_unpaired_pairwise_rows(
         if show_p and pairwise_test_name:
             corr_note = f"{result.pvalue_correction}-corrected" if n_pairs > 1 else "uncorrected, single comparison"
             print(f"{_DIM}  {p_col_header} = {ppi_prefix}{pairwise_test_name} ({corr_note}){_RESET}")
+        _print_pairwise_efficiency_note(_rows, result)
         if n_pairs > 1 and show_p:
             print(
                 f"  {_DIM}Verdict reflects the {result.ci_correction}-corrected CI; p is "
@@ -1579,6 +1582,15 @@ def _print_pairwise_section(
             header += f" {es_label:>8s}"
         if p_col_header:
             header += f" {p_col_header:>{pair_p_col_width}s}"
+        # Label-efficiency columns: unpaired PPI only, and only when EVERY row
+        # has both. A half-populated column reads as "this pair has no
+        # alignment" rather than "the extra call did not run", so it is all or
+        # nothing.
+        _show_eff = bool(rows) and all(
+            r.get("rho2") is not None and r.get("n_eff") is not None for r in rows
+        )
+        if _show_eff:
+            header += f" {'rho^2':>6s} {'N_eff':>6s}"
         print(header)
 
         for row_data in rows[:max_pairs]:
@@ -1608,6 +1620,9 @@ def _print_pairwise_section(
                 row_str += f" {float(row_data['es_value']):>8.3f}"
             if p_col_header:
                 row_str += f" {_format_p_value(row_data.get('display_p')):>{pair_p_col_width}s}"
+            if _show_eff:
+                row_str += (f" {float(row_data['rho2']):>6.2f}"
+                            f" {float(row_data['n_eff']):>6.0f}")
             print(row_str)
 
     if max_pairs == 0:
@@ -3702,7 +3717,58 @@ def _print_pareto_callout(pareto: dict, *, metric: Optional[str]) -> None:
 # Between-subjects (design="unpaired") summary
 # ─────────────────────────────────────────────────────────────────────────────
 
-def print_group_comparison_summary(result: "GroupComparisonResult", *, style: str = "gradient") -> None:
+_VERBOSE_SUMMARY = False
+
+
+def _print_pairwise_efficiency_note(rows: list[dict], result: "GroupComparisonResult") -> None:
+    """Explain the rho^2/N_eff columns in the reader's own numbers.
+
+    Two lines by default, aimed at someone who does not read statistics. The
+    qualifications a statistician would want -- that N_eff is an upper bound at
+    the variance-minimizing lambda, and that rank-based rho^2 is tied to the
+    effect size in this dataset -- are real but would double the length of a
+    note most readers need only once, so they print under
+    ``summary(verbose=True)``.
+    """
+    effs = [r.get("n_eff") for r in rows if r.get("n_eff") is not None]
+    if not effs:
+        return
+    lo, hi = min(effs), max(effs)
+    span = f"{lo:.0f}" if abs(hi - lo) < 0.5 else f"{lo:.0f} to {hi:.0f}"
+    n_lab = result.n_lab_per_condition
+    print(f"{_DIM}  rho^2 = how closely the judge tracks your human labels, for this test.{_RESET}")
+    tail = f", from the {n_lab:.0f} you labeled" if n_lab else ""
+    print(f"{_DIM}  N_eff (effective sample size) = how many hand-labeled items per "
+          f"condition{_RESET}")
+    print(f"{_DIM}  would have given you this much precision. Here {span}{tail}.{_RESET}")
+    if _VERBOSE_SUMMARY:
+        print(f"{_DIM}  N_eff is the best case, at the variance-minimizing lambda. The "
+              f"shipped test{_RESET}")
+        print(f"{_DIM}  can realize less. For rank-based tests (Mann-Whitney, "
+              f"Kruskal-Wallis) rho^2{_RESET}")
+        print(f"{_DIM}  also falls as the true effect grows, so these numbers describe "
+              f"this dataset{_RESET}")
+        print(f"{_DIM}  and should not be reused to plan a future study.{_RESET}")
+
+
+def _print_label_efficiency_lines(result: "GroupComparisonResult") -> None:
+    """The two omnibus label-efficiency lines, when the numbers are available.
+
+    Silent when they are not: they come from a best-effort extra call in
+    compare_unpaired, and a missing number should cost the reader two lines,
+    not an error.
+    """
+    if result.omnibus_rho2 is None or result.omnibus_n_eff is None:
+        return
+    print(f"  effective judge-human alignment  rho^2 = {result.omnibus_rho2:.2f}")
+    line = f"  N_eff (effective sample size) = {result.omnibus_n_eff:.0f} labels/condition"
+    n_lab = result.n_lab_per_condition
+    if n_lab:
+        line += f", {result.omnibus_n_eff / n_lab:.1f}x the {n_lab:.0f} you labeled"
+    print(line)
+
+
+def print_group_comparison_summary(result: "GroupComparisonResult", *, style: str = "gradient", verbose: bool = False) -> None:
     """Print the console summary for a between-subjects
     ``compare(design="unpaired")`` result.
 
@@ -3734,6 +3800,8 @@ def print_group_comparison_summary(result: "GroupComparisonResult", *, style: st
     same item scored by both entities, which has no between-subjects
     equivalent.
     """
+    global _VERBOSE_SUMMARY
+    _VERBOSE_SUMMARY = bool(verbose)
     from evalstats.core.unpaired import _GroupComparisonResultAsBundle
 
     print(f"{_BOLD}Between-subjects comparison{_RESET}  "
@@ -3770,12 +3838,20 @@ def print_group_comparison_summary(result: "GroupComparisonResult", *, style: st
         omnibus_name = f"PPI-{result.omnibus_test_name}" if result.ppi_applied else result.omnibus_test_name
         _print_subsection(f"--- Omnibus Test: {omnibus_name} ---")
         p_str = f"{result.omnibus_p_value:.4f}" if result.omnibus_p_value >= 0.0001 else f"{result.omnibus_p_value:.2e}"
-        print(f"  statistic = {result.omnibus_statistic:.4f}   p = {p_str}"
-              f"{'  (uncorrected)' if result.ppi_applied else ''}")
-        if result.omnibus_corrected_p_value is not None:
-            cp = result.omnibus_corrected_p_value
-            cp_str = f"{cp:.4f}" if cp >= 0.0001 else f"{cp:.2e}"
-            print(f"  PPI-corrected p = {cp_str}")
+        if result.ppi_applied:
+            # Corrected p FIRST. The uncorrected one is the number a reader
+            # must not report, so it goes last and carries its own warning:
+            # leading with it invites copying the wrong value into a paper.
+            if result.omnibus_corrected_p_value is not None:
+                cp = result.omnibus_corrected_p_value
+                cp_str = f"{cp:.4f}" if cp >= 0.0001 else f"{cp:.2e}"
+                print(f"  PPI-corrected p = {cp_str}")
+            _print_label_efficiency_lines(result)
+            print(f"  uncorrected: statistic = {result.omnibus_statistic:.4f}, p = {p_str}")
+            print(f"      ^ do not report this one. It treats the judge's scores as "
+                  f"if they were human labels.")
+        else:
+            print(f"  statistic = {result.omnibus_statistic:.4f}   p = {p_str}")
         print()
 
     # ── Pairwise table (includes critical-difference rank bands) ───────────

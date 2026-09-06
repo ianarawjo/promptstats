@@ -131,6 +131,29 @@ class GroupDiffResult:
     This field makes the mean-difference decision inspectable alongside it.
     None for the binary family, where ``p_value`` already is the Welch p."""
 
+    rho2: Optional[float] = None
+    """Judge-human alignment governing THIS pair's PPI variance reduction --
+    the squared correlation of the two influence functions, for the test
+    actually run on this pair. Not the raw kappa/Spearman from the alignment
+    report: those are score-level, this is test-specific. None when the
+    comparison is uncorrected, or when the alignment call could not supply it."""
+
+    n_eff: Optional[float] = None
+    """Effective human-label count PER CONDITION for this pair: how many
+    hand-labeled items per condition would have matched this pair's precision.
+
+    judge_alignment returns n_eff against the TOTAL item count a correlation
+    spans (``_pair_total_n`` sums across conditions for design="between"), so
+    the stored value here is that total divided by the 2 conditions the pair
+    spans. The omnibus figure divides by k instead. Getting that divisor wrong
+    silently inflates the number by a factor of k/2, which is why the two are
+    computed in one place (:func:`_ppi_label_efficiency`) rather than at each
+    call site.
+
+    This is the ORACLE bound, the efficiency available at the variance-
+    minimizing lambda; the shipped test may realize less (see
+    AlignmentResult's note on _attach_savings)."""
+
     @property
     def significant(self) -> bool:
         return not (self.ci_low <= self.null_value <= self.ci_high)
@@ -204,6 +227,16 @@ class GroupComparisonResult:
     pvalue_correction: str    # "shaffer" or "none" (k=2, single comparison)
     ppi_applied: bool
     alignment_result: Optional["AlignmentResult"] = None
+    omnibus_rho2: Optional[float] = None
+    """Whole-design judge-human alignment for the omnibus test, when one ran
+    and PPI is applied. Not decomposable into the pairwise values: the omnibus
+    correlation is defined across all conditions at once."""
+    omnibus_n_eff: Optional[float] = None
+    """Effective human labels PER CONDITION for the omnibus test (the total
+    judge_alignment returns, divided by the k conditions it spans)."""
+    n_lab_per_condition: Optional[float] = None
+    """Mean human labels actually collected per condition, for the
+    "N_eff against what you collected" comparison the summary prints."""
     show_p_values: bool = True
     pareto: Optional[dict] = None
 
@@ -251,9 +284,15 @@ class GroupComparisonResult:
 
     # ── reporting ───────────────────────────────────────────────────────────
 
-    def summary(self) -> None:
+    def summary(self, *, verbose: bool = False) -> None:
+        """Print the comparison report.
+
+        ``verbose=True`` adds the qualifications behind the label-efficiency
+        columns: that N_eff is the best case at the variance-minimizing lambda,
+        and that a rank-based rho^2 is tied to this dataset's effect size.
+        """
         from evalstats.core.summary import print_group_comparison_summary
-        print_group_comparison_summary(self)
+        print_group_comparison_summary(self, verbose=verbose)
 
     def plot(self, **kwargs):
         raise NotImplementedError(
@@ -665,6 +704,77 @@ def _compute_group_stats(
 # Main dispatcher
 # ─────────────────────────────────────────────────────────────────────────────
 
+_EFFICIENCY_TESTS = {
+    # family -> (omnibus test, pairwise test), in judge_alignment's vocabulary.
+    # These MUST track what compare_unpaired actually runs a few hundred lines
+    # below: anova_oneway/Welch t for binary, Kruskal-Wallis/Mann-Whitney for
+    # the rank_based family. A mismatch would report the efficiency of a test
+    # the user never ran, which is worse than reporting nothing.
+    "binary_proportion": ("anova_oneway", "ttest"),
+    "rank_based": ("kruskalwallis", "mannwhitney"),
+}
+
+
+def _ppi_label_efficiency(labels, group_arrays, group_lab_arrays, family):
+    """Judge-human alignment and effective label count for the tests just run.
+
+    Returns ``(omnibus_rho2, omnibus_n_eff, {(a, b): (rho2, n_eff)})``, with
+    every n_eff expressed PER CONDITION. Any element may be None: this is a
+    reporting extra, so a failure here must never take down a comparison that
+    otherwise succeeded.
+
+    Why judge_alignment is called again here rather than reusing the caller's
+    AlignmentResult: that one is score-level (kappa, Pearson, Spearman on the
+    raw scores) and carries no n_eff at all unless the caller happened to pass
+    ``test=``, which the documented workflow does not. The number that governs
+    a PPI variance reduction is the correlation of the two INFLUENCE functions
+    for the specific test, so it has to be requested per test. Form 3 takes the
+    same (judge, human) arrays already in hand.
+
+    n_eff arrives as a total over the conditions a correlation spans (see
+    ``_pair_total_n``), so it is divided by k for the omnibus and by 2 for each
+    pair. That divisor is the whole reason this lives in one function.
+    """
+    tests = _EFFICIENCY_TESTS.get(family)
+    if tests is None or len(labels) < 2:
+        return None, None, {}
+    omnibus_test, pairwise_test = tests
+    conds = {
+        str(lbl): (np.asarray(g, dtype=float), np.asarray(lab, dtype=float))
+        for lbl, g, lab in zip(labels, group_arrays, group_lab_arrays)
+    }
+    k = len(conds)
+
+    def _call(test):
+        from evalstats.alignment import judge_alignment
+        # Suppressed for the same reason the omnibus call above is: this
+        # constructs its own AlignmentResult with no selection=, and letting it
+        # print would drop a second, worse-disclosed alignment report into the
+        # middle of ours.
+        with contextlib.redirect_stdout(io.StringIO()):
+            return judge_alignment(conds, design="between", test=test,
+                                   selection="random", ci=False)
+
+    om_rho2 = om_neff = None
+    if k >= 3:
+        try:
+            m = _call(omnibus_test).omnibus_metric
+            if m is not None:
+                om_rho2 = float(m["estimate"]) ** 2
+                om_neff = float(m["n_eff"]) / k
+        except Exception:
+            pass
+
+    pairs = {}
+    try:
+        pm = _call(pairwise_test).test_pairwise_metrics or {}
+        for (a, b), m in pm.items():
+            pairs[(str(a), str(b))] = (float(m["estimate"]) ** 2, float(m["n_eff"]) / 2)
+    except Exception:
+        pairs = {}
+    return om_rho2, om_neff, pairs
+
+
 def compare_unpaired(
     df: pd.DataFrame,
     *,
@@ -973,8 +1083,26 @@ def compare_unpaired(
         if n_pairs > 1 else raw_p.copy()
     )
 
-    pairwise = [
-        GroupDiffResult(
+    # Judge-human alignment and effective label count for the tests just run.
+    # Reporting only: never allowed to fail the comparison, and skipped
+    # entirely when the metric is not judge-corrected (there is no PPI variance
+    # reduction to describe).
+    _om_rho2 = _om_neff = _n_lab_per_cond = None
+    _pair_eff = {}
+    if ppi_applied:
+        _om_rho2, _om_neff, _pair_eff = _ppi_label_efficiency(
+            labels, group_arrays, group_lab_arrays, family)
+        _counts = [int(np.count_nonzero(~np.isnan(lab))) for lab in group_lab_arrays]
+        _n_lab_per_cond = float(np.mean(_counts)) if _counts else None
+
+    def _eff_for(a, b):
+        """Pair efficiency, tolerating either key order from judge_alignment."""
+        return _pair_eff.get((a, b)) or _pair_eff.get((b, a)) or (None, None)
+
+    pairwise = []
+    for idx, (i, j) in enumerate(pw["pairs"]):
+        _r2, _ne = _eff_for(str(labels[i]), str(labels[j]))
+        pairwise.append(GroupDiffResult(
             label_a=labels[i], label_b=labels[j], estimand=estimand, null_value=null_value,
             point_estimate=float(pw["point"][idx]),
             ci_low=float(pw["ci_lo"][idx]), ci_high=float(pw["ci_hi"][idx]),
@@ -982,9 +1110,8 @@ def compare_unpaired(
             n_a=int(group_arrays[i].size), n_b=int(group_arrays[j].size),
             mean_test_p=(None if pw["mean_test_p"] is None
                          else float(pw["mean_test_p"][idx])),
-        )
-        for idx, (i, j) in enumerate(pw["pairs"])
-    ]
+            rho2=_r2, n_eff=_ne,
+        ))
 
     pareto_dict = None
     if secondary_col:
@@ -1021,5 +1148,7 @@ def compare_unpaired(
         ci_correction="bonferroni" if n_pairs > 1 else "none",
         pvalue_correction="shaffer" if n_pairs > 1 else "none",
         ppi_applied=ppi_applied, alignment_result=alignment_result,
+        omnibus_rho2=_om_rho2, omnibus_n_eff=_om_neff,
+        n_lab_per_condition=_n_lab_per_cond,
         show_p_values=p_values, pareto=pareto_dict,
     )
