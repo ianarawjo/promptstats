@@ -2434,6 +2434,55 @@ def _run_alignment_ppi(
             stacklevel=4,
         )
 
+    # ── Label efficiency for the corrected estimates ──────────────────────
+    #
+    # Attached to `cr` for the summary to render. Within-subjects, so every
+    # correlation is a "within" one and n_eff comes back against a single
+    # condition's item count (_pair_total_n returns one condition's length for
+    # design="within", since all conditions share the same items) -- no
+    # division by condition count here, unlike the between-subjects path.
+    #
+    # Three different estimands, three different correlations, deliberately:
+    #   marginal mean  -> that entity's own Pearson r^2 (mean influence
+    #                     function is the identity)
+    #   pairwise CI    -> the correlation of the PAIRED DIFFERENCES, which is
+    #                     what a mean-difference interval's variance depends on
+    #   pairwise p     -> Wilcoxon's own rank-based correlation
+    # Reporting one of these next to all three would misdescribe two of them.
+    try:
+        from evalstats.alignment import _efficiency_metric, _marginal_efficiency
+        _conds = {
+            str(lbl): (scores_2d[i], lab_matrix[i]) for i, lbl in enumerate(labels)
+        }
+        cr._marginal_n_eff = [
+            _marginal_efficiency(scores_2d[i], lab_matrix[i])[1]
+            for i in range(len(labels))
+        ]
+        if any(v is None for v in cr._marginal_n_eff):
+            cr._marginal_n_eff = None
+        _, _ci_pairs = _efficiency_metric(_conds, test="ttest", design="within",
+                                          want_pairs=True)
+        _, _p_pairs = _efficiency_metric(_conds, test="wilcoxon", design="within",
+                                         want_pairs=True)
+        cr._pair_ci_eff = _ci_pairs
+        cr._pair_p_eff = _p_pairs
+        cr._omnibus_eff = None
+        if len(labels) >= 3:
+            _om, _ = _efficiency_metric(_conds, test="friedman", design="within",
+                                        want_pairs=False)
+            cr._omnibus_eff = _om
+        _counts = [int(np.count_nonzero(~np.isnan(lab_matrix[i]))) for i in range(len(labels))]
+        cr._n_lab_per_entity = float(np.mean(_counts)) if _counts else None
+        # _print_bundle_summary is handed the bundle, not the ComparisonResult,
+        # so mirror the values onto it; cr keeps them for programmatic access.
+        for _a in ("_marginal_n_eff", "_pair_ci_eff", "_pair_p_eff",
+                   "_omnibus_eff", "_n_lab_per_entity"):
+            setattr(bundle, _a, getattr(cr, _a))
+    except Exception:
+        # Reporting extra: never allowed to break a correction that worked.
+        cr._marginal_n_eff = cr._pair_ci_eff = cr._pair_p_eff = None
+        cr._omnibus_eff = cr._n_lab_per_entity = None
+
     # ── Resolve the PPI-specific pairwise/robustness method ──────────────────
     from evalstats.core.resampling import is_binary_scores, is_bounded_01_scores
     from evalstats.config import resolve_ppi_auto_methods

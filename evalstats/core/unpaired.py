@@ -237,6 +237,10 @@ class GroupComparisonResult:
     n_lab_per_condition: Optional[float] = None
     """Mean human labels actually collected per condition, for the
     "N_eff against what you collected" comparison the summary prints."""
+    marginal_n_eff: Optional[list] = None
+    """Per-group effective label count for the MARGINAL mean CIs, in `groups`
+    order. A group's marginal mean spans only itself, so this needs no
+    per-condition division. None unless every group produced one."""
     show_p_values: bool = True
     pareto: Optional[dict] = None
 
@@ -1089,9 +1093,20 @@ def compare_unpaired(
     # reduction to describe).
     _om_rho2 = _om_neff = _n_lab_per_cond = None
     _pair_eff = {}
+    _marginal_neff = None
     if ppi_applied:
         _om_rho2, _om_neff, _pair_eff = _ppi_label_efficiency(
             labels, group_arrays, group_lab_arrays, family)
+        # Marginal means are PPI-corrected here too (see _compute_group_stats'
+        # lab_arrays), and their estimand is a plain mean, so each group's own
+        # Pearson r^2 governs. One number per group, spanning that group only.
+        from evalstats.alignment import _marginal_efficiency
+        _marginal_neff = [
+            _marginal_efficiency(g, lab)[1]
+            for g, lab in zip(group_arrays, group_lab_arrays)
+        ]
+        if any(v is None for v in _marginal_neff):
+            _marginal_neff = None
         _counts = [int(np.count_nonzero(~np.isnan(lab))) for lab in group_lab_arrays]
         _n_lab_per_cond = float(np.mean(_counts)) if _counts else None
 
@@ -1150,5 +1165,6 @@ def compare_unpaired(
         ppi_applied=ppi_applied, alignment_result=alignment_result,
         omnibus_rho2=_om_rho2, omnibus_n_eff=_om_neff,
         n_lab_per_condition=_n_lab_per_cond,
+        marginal_n_eff=_marginal_neff,
         show_p_values=p_values, pareto=pareto_dict,
     )

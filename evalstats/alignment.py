@@ -2821,3 +2821,69 @@ def _n_eff(r: float, n_lab: int, N: int) -> tuple[float, float]:
     return mult, n_lab * mult
 
 
+# ── Label efficiency for a comparison that has already run ─────────────────
+#
+# compare() knows which tests it ran; these turn that knowledge into the
+# rho^2/N_eff a reader needs beside each estimate. Kept here, next to
+# judge_alignment, because they are thin wrappers over it rather than new
+# statistics -- and shared so the paired and unpaired paths cannot drift into
+# reporting the same quantity two different ways.
+
+
+def _efficiency_metric(conds, *, test, design, want_pairs):
+    """One judge_alignment call, reduced to what a summary table needs.
+
+    Returns ``(omnibus, pairs)`` where omnibus is ``(rho2, n_eff_total)`` or
+    None, and pairs maps ``(a, b) -> (rho2, n_eff_total)``. n_eff is left as
+    the TOTAL judge_alignment returns; dividing it by the conditions a given
+    correlation spans is the caller's job, since only the caller knows whether
+    a row is an omnibus (k conditions), a pair (2), or a single mean (1).
+
+    Never raises: this is reporting, and a failure must cost a column rather
+    than the comparison that produced it.
+    """
+    import contextlib as _c, io as _io
+    try:
+        with _c.redirect_stdout(_io.StringIO()):
+            res = judge_alignment(conds, design=design, test=test,
+                                  selection="random", ci=False)
+    except Exception:
+        return None, {}
+    om = None
+    m = getattr(res, "omnibus_metric", None)
+    if m is not None:
+        try:
+            om = (float(m["estimate"]) ** 2, float(m["n_eff"]))
+        except Exception:
+            om = None
+    pairs = {}
+    if want_pairs:
+        for key, mm in (getattr(res, "test_pairwise_metrics", None) or {}).items():
+            try:
+                pairs[(str(key[0]), str(key[1]))] = (float(mm["estimate"]) ** 2,
+                                                     float(mm["n_eff"]))
+            except Exception:
+                pass
+    return om, pairs
+
+
+def _marginal_efficiency(judge, human):
+    """rho^2 and N_eff for ONE entity's marginal mean.
+
+    The estimand is a plain mean, whose influence function is the identity, so
+    this is exactly Pearson r^2 on the labeled pairs (verified bit-identical
+    against scipy). Routed through judge_alignment anyway so the number a user
+    sees here is produced by the same code path as every other rho^2 we report.
+
+    n_eff comes back against this entity's own item count, so it needs no
+    division: one condition spans itself.
+    """
+    import contextlib as _c, io as _io
+    try:
+        with _c.redirect_stdout(_io.StringIO()):
+            res = judge_alignment(np.asarray(judge, dtype=float),
+                                  np.asarray(human, dtype=float),
+                                  test="mean_estimate", selection="random", ci=False)
+        return float(res.test_metric["estimate"]) ** 2, float(res.n_eff)
+    except Exception:
+        return None, None

@@ -1034,6 +1034,69 @@ def _print_cross_model_executive_summary(bundle: MultiModelBundle) -> None:
 # Single-model bundle summary
 # ---------------------------------------------------------------------------
 
+def _pair_efficiency_cells(bundle, left, right) -> dict:
+    """The four label-efficiency cells for one paired row, if available.
+
+    Two separate lookups on purpose: the interval's efficiency comes from the
+    correlation of the paired differences, the p-value's from the rank test's
+    own. Missing entries yield None, which the renderer treats as "hide the
+    column" rather than "print a blank".
+    """
+    def _get(store):
+        d = getattr(bundle, store, None) or {}
+        return d.get((str(left), str(right))) or d.get((str(right), str(left)))
+    ci = _get("_pair_ci_eff")
+    pv = _get("_pair_p_eff")
+    # The p-side pair is filled in only when the p-value tests a DIFFERENT
+    # estimand from the interval. See _p_side_efficiency_applies.
+    return {
+        "ci_rho2": ci[0] if ci else None,
+        "ci_n_eff": ci[1] if ci else None,
+        "_wsr_rho2": pv[0] if pv else None,
+        "_wsr_n_eff": pv[1] if pv else None,
+    }
+
+
+def _p_side_efficiency_applies(eff_p_source: Optional[str], data_kind=None) -> bool:
+    """Whether the p-value tests a different estimand from the interval.
+
+    The paired path's p can come from four places. "boot"/"max_t" are
+    bootstrap p-values on the SAME mean difference the interval covers, so
+    their efficiency is the interval's -- printing a second, separately
+    computed pair of columns beside it would imply a distinction that does not
+    exist, and the two would differ only by Monte Carlo noise in the two
+    judge_alignment calls. Only the rank-based sources ("wsr" Wilcoxon
+    signed-rank, "nem" Nemenyi) test something else and need their own number.
+
+    Getting this wrong is the exact failure _EFFICIENCY_TESTS warns about:
+    reporting the efficiency of a test the user never ran.
+
+    Suppressed entirely on BINARY data. A rank-based correlation on 0/1 scores
+    is not something this project validates: _COMPARISON_METHODS_BINARY drops
+    mwu/wilcoxon for exactly that reason ("rank-based and break down under that
+    many ties"), and the paper's binary PPI claims cover the t-test path only.
+    A reader can still force p_value_method="wsr" on binary data and get a
+    Wilcoxon p; what they must not get is an efficiency figure implying that
+    number rests on validated ground.
+    """
+    if str(data_kind) == "binary":
+        return False
+    return eff_p_source in {"wsr", "nem"}
+
+
+def _paired_efficiency_row(bundle, left, right, eff_p_source) -> dict:
+    """Efficiency cells for one paired row, with the p-side gated on source."""
+    cells = _pair_efficiency_cells(bundle, left, right)
+    applies = _p_side_efficiency_applies(
+        eff_p_source, getattr(bundle, "resolved_data_kind", None))
+    return {
+        "ci_rho2": cells["ci_rho2"],
+        "ci_n_eff": cells["ci_n_eff"],
+        "rho2": cells["_wsr_rho2"] if applies else None,
+        "n_eff": cells["_wsr_n_eff"] if applies else None,
+    }
+
+
 def _prepare_paired_pairwise_rows(
     bundle: "AnalysisBundle",
     *,
@@ -1171,6 +1234,9 @@ def _prepare_paired_pairwise_rows(
                 "agreement_mcc": result.agreement_mcc,
                 "binary_confusion": result.binary_confusion,
                 "multi_ci": swapped_multi_ci,
+                # Label efficiency, looked up in either key order because the
+                # display pair may be swapped relative to how it was computed.
+                **_paired_efficiency_row(bundle, left_item, right_item, eff_p_source),
             }
         )
 
@@ -1213,6 +1279,14 @@ def _prepare_paired_pairwise_rows(
             f"  {omnibus_label}: χ²({fr.df}) = {fr.statistic:.3f}{stat_note}, "
             f"p = {fr_p_color}{fr_p_str}{_RESET}{p_note}"
         )
+        _om_eff = getattr(bundle, "_omnibus_eff", None)
+        if ppi_applied and _om_eff:
+            _n_lab = getattr(bundle, "_n_lab_per_entity", None)
+            print(f"  effective judge-human alignment  rho^2 = {_om_eff[0]:.2f}")
+            _l = f"  N_eff (effective sample size) = {_om_eff[1]:.0f} labels"
+            if _n_lab:
+                _l += f", {_om_eff[1] / _n_lab:.1f}x the {_n_lab:.0f} you labeled"
+            print(_l)
         if fr.p_value > 0.05:
             print(f"  {_YELLOW}[!] {omnibus_label} p > 0.05: no significant omnibus effect — treat pairwise results with caution.{_RESET}")
 
@@ -1578,19 +1652,30 @@ def _print_pairwise_section(
             f"{pair_stat_label:>8s} "
             f"{'CI Low':>9s} {'CI High':>9s}"
         )
+        # Label efficiency, in TWO independent groups, each sitting beside the
+        # quantity it describes. They are different estimands and generally
+        # different numbers: a mean-difference interval's variance depends on
+        # the correlation of the PAIRED DIFFERENCES, while the rank test's
+        # depends on its own rank-based correlation. One shared column would
+        # misdescribe whichever it was not computed for.
+        #
+        # Shown only when EVERY row has the pair: a half-populated column reads
+        # as "this pair has no alignment" rather than "the extra call did not
+        # run", so it is all or nothing.
+        def _all_have(*keys):
+            return bool(rows) and all(
+                all(r.get(kk) is not None for kk in keys) for r in rows
+            )
+        _show_ci_eff = _all_have("ci_rho2", "ci_n_eff")
+        _show_p_eff = bool(p_col_header) and _all_have("rho2", "n_eff")
+        if _show_ci_eff:
+            header += f" {'rho2(CI)':>8s} {'Neff(CI)':>8s}"
         if es_label:
             header += f" {es_label:>8s}"
         if p_col_header:
             header += f" {p_col_header:>{pair_p_col_width}s}"
-        # Label-efficiency columns: unpaired PPI only, and only when EVERY row
-        # has both. A half-populated column reads as "this pair has no
-        # alignment" rather than "the extra call did not run", so it is all or
-        # nothing.
-        _show_eff = bool(rows) and all(
-            r.get("rho2") is not None and r.get("n_eff") is not None for r in rows
-        )
-        if _show_eff:
-            header += f" {'rho^2':>6s} {'N_eff':>6s}"
+        if _show_p_eff:
+            header += f" {'rho2(p)':>7s} {'Neff(p)':>7s}"
         print(header)
 
         for row_data in rows[:max_pairs]:
@@ -1616,13 +1701,16 @@ def _print_pairwise_section(
                 f"{float(row_data['ci_low']):+9.4f} "
                 f"{float(row_data['ci_high']):+9.4f}"
             )
+            if _show_ci_eff:
+                row_str += (f" {float(row_data['ci_rho2']):>8.2f}"
+                            f" {float(row_data['ci_n_eff']):>8.0f}")
             if es_label:
                 row_str += f" {float(row_data['es_value']):>8.3f}"
             if p_col_header:
                 row_str += f" {_format_p_value(row_data.get('display_p')):>{pair_p_col_width}s}"
-            if _show_eff:
-                row_str += (f" {float(row_data['rho2']):>6.2f}"
-                            f" {float(row_data['n_eff']):>6.0f}")
+            if _show_p_eff:
+                row_str += (f" {float(row_data['rho2']):>7.2f}"
+                            f" {float(row_data['n_eff']):>7.0f}")
             print(row_str)
 
     if max_pairs == 0:
@@ -1707,6 +1795,7 @@ def _print_mean_advantage(
     line_width: int,
     template_col_width: int = 24,
     style: Literal["line", "gradient"] = "gradient",
+    n_eff_per_entity: Optional[list] = None,
 ) -> None:
     """Print the absolute performance interval-plot table for a set of entities.
 
@@ -1769,9 +1858,15 @@ def _print_mean_advantage(
         f"  axis: [{ma_low:.3f}, {ma_high:.3f}]"
         f"  (· ±1σ, {_ci_legend_ma}{_mean_marker_ma}, │ {ref_label})"
     )
+    _show_neff = (
+        n_eff_per_entity is not None
+        and len(n_eff_per_entity) == len(labels)
+        and all(v is not None for v in n_eff_per_entity)
+    )
     print(
         f"  {item_singular_title:<{template_col_width}s} {'Interval Plot':<{line_width}s} {stat_label:>8s} "
         f"{'CI Low':>9s} {'CI High':>9s}"
+        + (f" {'N_eff':>7s}" if _show_neff else "")
     )
     for i, label in enumerate(labels):
         template_label = _truncate_label(label, template_col_width)
@@ -1794,6 +1889,7 @@ def _print_mean_advantage(
             f"{float(mean[i]):>7.3f} "
             f"{float(ci_low[i]):>8.3f} "
             f"{float(ci_high[i]):>8.3f}"
+            + (f" {float(n_eff_per_entity[i]):>7.0f}" if _show_neff else "")
         )
 
 
@@ -1905,6 +2001,7 @@ def _print_bundle_summary(
         line_width=line_width,
         template_col_width=template_col_width,
         style=style,
+        n_eff_per_entity=getattr(bundle, "_marginal_n_eff", None),
     )
     print()
 
@@ -3736,11 +3833,12 @@ def _print_pairwise_efficiency_note(rows: list[dict], result: "GroupComparisonRe
     lo, hi = min(effs), max(effs)
     span = f"{lo:.0f}" if abs(hi - lo) < 0.5 else f"{lo:.0f} to {hi:.0f}"
     n_lab = result.n_lab_per_condition
-    print(f"{_DIM}  rho^2 = how closely the judge tracks your human labels, for this test.{_RESET}")
+    print(f"{_DIM}  rho^2 and N_eff describe the p-value only, not the interval "
+          f"beside it.{_RESET}")
     tail = f", from the {n_lab:.0f} you labeled" if n_lab else ""
     print(f"{_DIM}  N_eff (effective sample size) = how many hand-labeled items per "
           f"condition{_RESET}")
-    print(f"{_DIM}  would have given you this much precision. Here {span}{tail}.{_RESET}")
+    print(f"{_DIM}  would have given the test this much power. Here {span}{tail}.{_RESET}")
     if _VERBOSE_SUMMARY:
         print(f"{_DIM}  N_eff is the best case, at the variance-minimizing lambda. The "
               f"shipped test{_RESET}")
@@ -3830,6 +3928,7 @@ def print_group_comparison_summary(result: "GroupComparisonResult", *, style: st
         line_width=line_width,
         template_col_width=label_width,
         style=style,
+        n_eff_per_entity=result.marginal_n_eff,
     )
     print()
 
