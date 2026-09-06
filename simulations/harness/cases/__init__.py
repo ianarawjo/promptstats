@@ -2,9 +2,16 @@
 
 Each case module exposes:
   CASE_NAME: str
-  add_arguments(subparser) -> None   register case-specific CLI flags
-  run(args) -> CaseResult            orchestrate + write output artifacts
-  official_args(base_seed) -> Namespace   canonical "official test" preset
+  add_arguments(subparser) -> None        register case-specific CLI flags
+  run(args) -> CaseResult                 orchestrate + write output artifacts
+  official_variants(base_seed) -> list[(label, Namespace)]
+                                           the paper's official preset(s)
+  quick_args(base_seed, data_source) -> Namespace
+                                           a fast smoke-test preset
+  official_args(base_seed) -> Namespace   internal building block some
+                                           modules use to construct the
+                                           presets above; not called directly
+                                           by cli.py
 """
 
 from __future__ import annotations

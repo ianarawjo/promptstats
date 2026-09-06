@@ -65,8 +65,7 @@ recommendations (logit_t, nig) transfer here directly. mover_t is the control
 that separates what the combination rule buys from what the arm buys.
 
 Known limitations of this first pass (deliberate, to keep the engine small):
-synthetic sources only (no real-data corpora), runs=1 only (no multi-run /
-nested variants), statistic=mean only.
+runs=1 only (no multi-run / nested variants), statistic=mean only.
 
 Run:
     python -m simulations.harness.cli ci_unpaired --quick
@@ -159,6 +158,10 @@ real result rather than avoid a spurious one."""
 
 @dataclass
 class SimResult:
+    """One (source, n_a, n_b, method) cell's aggregated outcome over n_reps
+    Monte Carlo draws: coverage, width, interval-score components, rejection
+    rate and timing, summed rather than averaged so cells can be pooled
+    before dividing."""
     source: str
     label: str
     eval_type: str
@@ -169,14 +172,28 @@ class SimResult:
     covered: int
     total_width: float
     total_score: float = 0.0
+    """Sum of interval_score() (see evalstats.core.stats_utils) across n_reps."""
     total_pen_under: float = 0.0
+    """Sum of the (2/alpha)*(lo - target) penalty for target BELOW the interval.
+
+    Bracher, Ray, Gneiting & Reich (2021) decompose the interval score into
+    width (sharpness) and the penalty for the true value falling outside the
+    interval (calibration), splitting the latter into over- and
+    underprediction to expose systematic bias. Kept separate from
+    total_score because the mean score is ~90% width, so a method can
+    under-cover badly and still post the best score -- the penalty term is
+    what tracks calibration."""
     total_pen_over: float = 0.0
+    """Sum of the (2/alpha)*(target - hi) penalty for target ABOVE the interval."""
     rejects: int = 0
     """Reps whose CI excluded zero: Type I error on is_null rows, power elsewhere."""
     total_time: float = 0.0
+    """Sum of wall-clock seconds spent computing this method's interval, across n_reps."""
     total_time_sq: float = 0.0
     is_null: bool = False
+    """Whether this source's true_diff is exactly zero (a Type I / calibration row)."""
     true_value: float = 0.0
+    """The coverage target for this source: source.true_diff, mean(A) - mean(B)."""
     base_n: int = 0
     """The sweep's size parameter for this cell, before the imbalance ratio.
 
@@ -337,46 +354,35 @@ def _mover_combine(
     KNOWN STRUCTURAL LIMIT -- read before promoting any mover_* method.
     MOVER assembles the difference interval out of the two MARGINAL
     intervals, so it inherits whatever miscalibration those marginals carry
-    and can never benefit from error that cancels in the subtraction. On the
-    saturating shape cont-one-inflated-extreme at icc=0.95, both arms' means
-    are severely left-skewed (skew -1.45 and -1.03 at n=15/30) and EVERY
-    one-sample interval covers badly there -- measured at n=15, logit_t
-    reaches 0.55 and t_interval 0.52. But their difference is far milder
-    (skew -0.69) because the two skews partly cancel, so welch_t, which
-    targets the difference directly, covers 0.95 while mover_logit_t
-    inherits both bad marginals and manages only 0.72.
+    and can never benefit from error that cancels in the subtraction. On a
+    saturating shape (e.g. cont-one-inflated-extreme at high icc), both arms'
+    means are severely skewed and every one-sample interval covers badly
+    there, but the ARMS' DIFFERENCE is far milder because the two skews
+    partly cancel -- so welch_t, which targets the difference directly,
+    covers correctly while mover_logit_t inherits both bad marginals and
+    under-covers.
 
     So MOVER is the right construction exactly when the marginals are
     well-calibrated -- which is why newcombe_hybrid works so well on binary
     (Wilson marginals are excellent) and why mover_logit_t is fine on likert
     and ordinary continuous data but not on ceiling-saturated continuous.
-    This is a property of the construction, not a bug in it, and it is NOT
-    FIXABLE -- established by giving MOVER an ORACLE marginal, the exact 95%
-    interval built from each arm's true sampling distribution by heavy Monte
-    Carlo, i.e. the best any arm method could possibly be. Even then MOVER
-    under-covers at 0.922 while being WIDER than welch_t (0.096 vs 0.088,
-    which covers 0.963). No arm interval, existing or hypothetical, rescues
-    it: assembling from marginals prices in each arm's full skew, while the
-    difference's own skew is far milder because the two partly cancel, and
-    MOVER cannot reach that cancellation.
+    This is a property of the construction, not a bug in it, and it is not
+    fixable by a better arm method: even an ORACLE marginal (the exact 95%
+    interval built from each arm's true sampling distribution) still
+    under-covers here while being wider than welch_t, because assembling
+    from marginals prices in each arm's full skew, while the difference's
+    own skew is milder from cancellation that MOVER cannot reach.
 
-    Candidate fixes tried and rejected, each on measurement, so they are not
-    re-attempted:
-      * degenerate arms combined by interval arithmetic rather than in
-        quadrature -- coverage moved 0.000, and only 7.3% of draws have a
-        degenerate arm at all;
-      * logit_t order=2, whose docstring documents a real coverage gain on
-        boundary-hugging skewed data at small n -- WORSE here (0.708 vs
-        0.725) despite being 29% wider, the same mis-centring signature;
-      * a hybrid that switches the arm to NIG when the sample looks
-        saturated -- 0.731, i.e. no change;
-      * NIG arms throughout -- works (0.999) but that is simply mover_nig,
-        at 2.2x welch_t's width.
+    Candidate fixes tried and rejected: combining degenerate arms by interval
+    arithmetic instead of in quadrature; logit_t order=2 (its documented
+    small-n boundary gain does not transfer to this failure mode); switching
+    the arm to NIG only when the sample looks saturated. None moved coverage.
+    NIG arms throughout does fix it, but that is simply mover_nig, at over
+    2x welch_t's width.
 
-    The failure is not confined to one shape: cont-zero-inflated-extreme
-    fails too (0.849), so it is both boundaries. Likert is unaffected because
-    no likert shape saturates -- the most extreme sits at 4.63/5 and never
-    yields a constant sample -- so the regime does not arise there.
+    Affects both boundaries (one-inflated and zero-inflated saturating
+    shapes), not one. Likert is unaffected because no likert shape saturates
+    enough to yield a constant sample, so the regime does not arise there.
     """
     d = ta - tb
     lo = d - float(np.sqrt((ta - arm_a[0]) ** 2 + (arm_b[1] - tb) ** 2))
@@ -909,7 +915,16 @@ def _run_cell(
     agresti_min_max_n: int = _AGRESTI_MIN_MAX_N,
     base_n: int = 0,
 ) -> list[SimResult]:
-    """Run all reps for one (source, n_a, n_b) cell."""
+    """Run all reps for one (source, n_a, n_b) cell.
+
+    ``method_names``, if given, restricts computation (not just reporting) to
+    methods whose ``.name`` is in the set, which matters because the slate
+    spans a wide cost range -- e.g. agresti_min is ~100x a Welch interval
+    (see ``_agresti_min_ci``) -- so filtering a sweep down to a few methods
+    should skip the others' work entirely rather than compute and discard
+    it. ``None`` (default) runs every applicable method for the source's
+    eval type, matching prior behavior.
+    """
     rng = np.random.default_rng(seed)
     is_binary = source.eval_type == "binary"
     scale_bounds = source.scale_bounds or EVAL_TYPE_SCALE_BOUNDS[source.eval_type]
@@ -1093,6 +1108,14 @@ def run_simulation(
     method_names: frozenset[str] | None = None,
     agresti_min_max_n: int = _AGRESTI_MIN_MAX_N,
 ) -> list[SimResult]:
+    """Run the full Monte Carlo sweep: every source x sample size x size
+    ratio cell, each producing one ``SimResult`` per applicable method.
+
+    Builds the cell list (applying ``size_ratios`` to a randomly-chosen arm
+    per cell, see below), binds a reproducible child seed to each cell via
+    ``np.random.SeedSequence``, shuffles execution order for a representative
+    ETA, then runs cells serially or across ``n_workers`` processes.
+    """
     global _CELL_SOURCES
     _CELL_SOURCES = list(sources)
 
@@ -1169,6 +1192,10 @@ def run_simulation(
 
 @dataclass
 class ExactResult:
+    """One (method, n_a, n_b) cell's exactly-enumerated coverage: the
+    worst-case and mean coverage over a (p_A, p_B) grid, the grid point
+    where the worst case occurs, and the mean interval width -- all computed
+    by exact enumeration over every possible table, not Monte Carlo."""
     method: str
     n_a: int
     n_b: int
@@ -1440,6 +1467,10 @@ def _print_overall_summary_table(
 
 
 def print_report(results: list[SimResult], alpha: float, sample_sizes: list[int]) -> None:
+    """Print the console report: a per-(eval type, n) coverage grid followed
+    by one OVERALL SUMMARY table per eval type (coverage, width, score,
+    penalty, Type I/power, timing). Aggregates non-null cells per scenario
+    per n before averaging, matching ``_headline_cov_width_score``."""
     target = 1.0 - alpha
     n_reps = results[0].n_reps if results else 0
     type1_map, power_map = _decision_rates(results)
@@ -1623,6 +1654,10 @@ def latex_exact_summary(results: list, alpha: float) -> str:
 def save_results_artifacts(
     results: list[SimResult], alpha: float, out_dir: str, run_stem: str, latex: bool = False,
 ) -> list[str]:
+    """Write the per-cell results CSV (``{run_stem}_results.csv``, one row per
+    ``SimResult`` with derived rates/means added) and the console report,
+    captured to ``{run_stem}_summary.log``; appends LaTeX tables to the log
+    when ``latex`` is set. Returns the list of written paths."""
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     csv_path = out / f"{run_stem}_results.csv"
@@ -1903,6 +1938,9 @@ def save_reliability_violin_plot(results: list[SimResult], alpha: float, out_pat
 
 
 def add_arguments(parser: argparse.ArgumentParser) -> None:
+    """Register this case's CLI flags (data source, scenario/method
+    selection, sweep sizes and ratios, Monte Carlo and exact-coverage
+    controls, and output options) on the harness's per-case subparser."""
     parser.add_argument("--data-source", choices=DATA_SOURCES, default="synthetic",
                         help="'synthetic' (default) or 'real' -- human labels from the "
                              "judge-bias corpora and the App Store review corpus, split "
@@ -2008,9 +2046,9 @@ def official_variants(base_seed: int = 42) -> list[tuple[str, argparse.Namespace
 def quick_args(base_seed: int = 43, data_source: str = "synthetic") -> argparse.Namespace:
     """Small smoke-test preset -- runs in well under a minute.
 
-    ``data_source`` is accepted and ignored (this case is synthetic-only in
-    this pass), matching the convention the other synthetic-only cases use
-    so ``--quick-test``'s synthetic+real double call still works.
+    ``data_source`` is accepted and ignored: this preset always runs the
+    synthetic scenario suite, so ``--quick-test``'s second (real-data) call
+    is a no-op here rather than exercising ``build_real_unpaired_sources``.
     """
     return argparse.Namespace(
         data_source="synthetic", scenario_suite="standard",
@@ -2028,6 +2066,16 @@ def quick_args(base_seed: int = 43, data_source: str = "synthetic") -> argparse.
 
 
 def run(args: argparse.Namespace) -> CaseResult:
+    """Case entry point (the harness's per-case ``run`` contract).
+
+    Two independent modes: ``--exact-coverage`` runs the binary-only exact
+    enumeration path (``run_exact_coverage``) and returns early; otherwise
+    builds sources (synthetic or real per ``args.data_source``), runs the
+    Monte Carlo sweep (``run_simulation``), prints the console report, and
+    optionally saves result artifacts and plots. Returns a ``CaseResult``
+    with status, output paths and headline metrics; exceptions are caught
+    and reported as an error status rather than propagated.
+    """
     t0 = time.time()
     try:
         plots_dir = args.plots_dir or str(Path(args.out_dir) / "plots")

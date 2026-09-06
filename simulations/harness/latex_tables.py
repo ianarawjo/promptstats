@@ -44,8 +44,8 @@ def report_eval_type_group(et: str) -> str:
     "numeric" bucket covering continuous+likert+grades together.
 
     Likert gets its own block rather than being averaged into "numeric"
-    alongside continuous: those were found (2026-08-11) to have materially
-    different small-N paired-diff behavior, and pooling them hides exactly
+    alongside continuous: the two have materially different small-N
+    paired-diff behavior, and pooling them hides exactly
     that distinction -- concretely, it also mixes likert's 1--5-scale widths
     with grades' 0--100-scale widths. The coarser `eval_type_group` is kept
     for `csv_to_latex_summary.py` and `csv_to_simultaneous_ci_summary.py`,

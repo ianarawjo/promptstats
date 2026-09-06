@@ -31,12 +31,14 @@ CASES = {
 
 
 def _case_summary(module) -> str:
+    """First non-blank line of a case module's docstring, used as its --list-cases/subparser help text."""
     doc = module.__doc__ or ""
     lines = [ln.strip() for ln in doc.strip().splitlines() if ln.strip()]
     return lines[0] if lines else ""
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """Build the top-level parser: --list-cases/--official-tests/--quick-test flags plus one subparser per case."""
     parser = argparse.ArgumentParser(
         prog="python -m simulations.harness.cli",
         description=__doc__,
@@ -191,6 +193,7 @@ def _run_preset(case_names: list[str], args_factory, dir_prefix: str, label: str
 
 
 def main(argv: list[str] | None = None) -> None:
+    """CLI entry point: dispatches to --list-cases, --official-tests, --quick-test, or a single named case."""
     parser = build_parser()
     args = parser.parse_args(argv)
 

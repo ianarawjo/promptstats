@@ -26,6 +26,8 @@ Requires a CSV with ``total_score``/``mean_score`` and
 2026-07-15) -- older CSVs predating that change won't have Score and will
 error out with a clear message rather than silently omitting it or guessing.
 
+Default LaTeX label is ``tab:overall_summary`` (override with --label).
+
 Usage:
   python -m simulations.harness.csv_to_latex_summary path/to/..._results.csv
   python -m simulations.harness.csv_to_latex_summary path/to/..._results.csv \\

@@ -509,6 +509,9 @@ def _mc_proportion_stats(successes: int, total: int, z: float = 1.96) -> tuple[f
 
 @dataclass
 class PairwiseResult:
+    """One (eval_type, source, n, method) cell's Type-I/power outcome from
+    the non-PPI pairwise sweep."""
+
     eval_type: str
     label: str
     n: int
@@ -697,6 +700,9 @@ def _pairwise_methods_allowed(eval_type: str) -> list:
 def _run_pairwise_cell(
     source: CIPairSource, n: int, runs: int, n_reps: int, n_bootstrap: int, alpha: float, statistic: str, seed,
 ) -> list[PairwiseResult]:
+    """Run n_reps replications of a paired 2-group test at one (source, n)
+    cell, across every method allowed for the source's eval type. One
+    PairwiseResult per method."""
     methods = _pairwise_methods_allowed(source.eval_type)
     if source.is_null:
         condition = "null"
@@ -772,6 +778,9 @@ def run_pairwise_simulation(
     sources: list[CIPairSource], sample_sizes: list[int], runs: int, n_reps: int, n_bootstrap: int,
     alpha: float, statistic: str, progress_mode: str = "bar", seed: int = 42, n_workers: int = 1,
 ) -> list[PairwiseResult]:
+    """Sweep _run_pairwise_cell over every (source, sample size) cell,
+    parallelized across n_workers, and flatten the per-cell PairwiseResult
+    lists into one list."""
     global _PAIRWISE_SOURCES
     _PAIRWISE_SOURCES = list(sources)
     ss = np.random.SeedSequence(seed)
@@ -798,6 +807,8 @@ def run_pairwise_simulation(
 
 
 def print_pairwise_report(results: list[PairwiseResult], alpha: float) -> None:
+    """Print the console Type-I-error/power report for a pairwise run,
+    grouped by eval type and method."""
     _, _bradley_hi = bradley_bounds(alpha)
     print(f"\n{'='*78}\n  PVALUES (PAIRWISE, NON-PPI) -- TYPE I ERROR + POWER\n  Nominal alpha: {alpha}\n{'='*78}")
     present_methods = {r.method for r in results}
@@ -1026,6 +1037,8 @@ def latex_pairwise_overall_summary(results: list[PairwiseResult], alpha: float) 
 
 
 def save_results_artifacts_pairwise(*, results: list[PairwiseResult], alpha: float, out_dir: str, run_stem: str, latex: bool = False) -> list[str]:
+    """Write the pairwise run's results CSV (and LaTeX summary if
+    `latex=True`) under out_dir. Returns the written file paths."""
     out_base = Path(out_dir)
     out_base.mkdir(parents=True, exist_ok=True)
     csv_path = out_base / f"{run_stem}_pairwise_results.csv"
@@ -1258,6 +1271,9 @@ def save_pairwise_reliability_violin_plot(*, results: list[PairwiseResult], alph
 
 @dataclass
 class MultiArmResult:
+    """One (eval_type, source, n, k, correction) cell's FWER/best-arm-power
+    outcome from the non-PPI multi-arm sweep."""
+
     eval_type: str
     label: str
     n: int
@@ -1818,6 +1834,9 @@ def _run_multiarm_cell(
     source: MultiArmSource, n: int, runs: int, k_arms: int, n_reps: int, n_bootstrap: int,
     alpha: float, multiarm_method: str, statistic: str, seed, corrections: list[str] | None = None,
 ) -> list[MultiArmResult]:
+    """Run n_reps replications of a k-arm comparison at one (source, n, k)
+    cell, across every requested multiple-comparisons correction. One
+    MultiArmResult per correction."""
     labels = [f"arm_{i}" for i in range(k_arms)]
     if corrections is None:
         corrections = [m.name for m in MULTIARM_CORRECTION_METHODS]
@@ -1895,6 +1914,9 @@ def run_multiarm_simulation(
     n_bootstrap: int, alpha: float, multiarm_method: str, statistic: str, progress_mode: str = "bar",
     seed: int = 42, n_workers: int = 1, corrections: list[str] | None = None,
 ) -> list[MultiArmResult]:
+    """Sweep _run_multiarm_cell over every (source, sample size, k) cell,
+    parallelized across n_workers, and flatten the per-cell MultiArmResult
+    lists into one list."""
     global _MULTIARM_SOURCES
     _MULTIARM_SOURCES = list(sources)
     ss = np.random.SeedSequence(seed)
@@ -1933,6 +1955,8 @@ def _time_stats_multiarm(results: list[MultiArmResult]) -> tuple[float, float]:
 
 
 def print_multiarm_report(results: list[MultiArmResult], alpha: float) -> None:
+    """Print the console FWER/best-arm-power report for a multi-arm run,
+    grouped by eval type and k."""
     _, _bradley_hi = bradley_bounds(alpha)
     print(f"\n{'='*78}\n  PVALUES (MULTI-ARM, NON-PPI) -- FWER + BEST-ARM POWER\n  Nominal alpha: {alpha}\n{'='*78}")
     corrections = [m.name for m in MULTIARM_CORRECTION_METHODS if m.name in {r.correction for r in results}]
@@ -2111,6 +2135,8 @@ def latex_multiarm_overall_summary(results: list[MultiArmResult], alpha: float, 
 
 
 def save_results_artifacts_multiarm(*, results: list[MultiArmResult], alpha: float, out_dir: str, run_stem: str, latex: bool = False) -> list[str]:
+    """Write the multi-arm run's results CSV (and LaTeX summary if
+    `latex=True`) under out_dir. Returns the written file paths."""
     out_base = Path(out_dir)
     out_base.mkdir(parents=True, exist_ok=True)
     csv_path = out_base / f"{run_stem}_multiarm_results.csv"
@@ -2833,6 +2859,9 @@ def _canonical_ci_func(eval_type: str):
 
 @dataclass
 class SimultaneousCIResult:
+    """One (eval_type, source, n, k, CI method) cell's family-wise
+    coverage/width outcome from the simultaneous-CI sweep."""
+
     eval_type: str
     label: str
     n: int
@@ -2881,6 +2910,9 @@ def _run_simultaneous_ci_cell(
     source: MultiArmSource, n: int, runs: int, k_arms: int, n_reps: int, n_bootstrap: int,
     alpha: float, multiarm_method: str, statistic: str, seed, ci_methods: list[str] | None = None,
 ) -> list[SimultaneousCIResult]:
+    """Run n_reps replications of a k-arm simultaneous-CI sweep at one
+    (source, n, k) cell, across every requested CI method. One
+    SimultaneousCIResult per method."""
     labels = [f"arm_{i}" for i in range(k_arms)]
     pairs = [(labels[i], labels[j]) for i in range(k_arms) for j in range(i + 1, k_arms)]
     ci = 1.0 - alpha
@@ -3160,6 +3192,9 @@ def run_simultaneous_ci_simulation(
     n_bootstrap: int, alpha: float, multiarm_method: str, statistic: str, progress_mode: str = "bar",
     seed: int = 42, n_workers: int = 1, ci_methods: list[str] | None = None,
 ) -> list[SimultaneousCIResult]:
+    """Sweep _run_simultaneous_ci_cell over every (source, sample size, k)
+    cell, parallelized across n_workers, and flatten the per-cell
+    SimultaneousCIResult lists into one list."""
     global _SIMULTANEOUS_CI_SOURCES
     _SIMULTANEOUS_CI_SOURCES = list(sources)
     ss = np.random.SeedSequence(seed)
@@ -3198,6 +3233,8 @@ def _time_stats_simultaneous_ci(results: list[SimultaneousCIResult]) -> tuple[fl
 
 
 def print_simultaneous_ci_report(results: list[SimultaneousCIResult], alpha: float) -> None:
+    """Print the console family-wise-coverage report for a simultaneous-CI
+    run, grouped by eval type and k."""
     target = 1.0 - alpha
     print(f"\n{'='*78}\n  PVALUES (SIMULTANEOUS CI) -- none vs. BONFERRONI vs. max-T vs. Tango variants\n"
           f"  Nominal family-wise coverage: {target:.0%}\n{'='*78}")
@@ -3529,6 +3566,8 @@ def latex_simultaneous_ci_full_report(results: list[SimultaneousCIResult], alpha
 def save_results_artifacts_simultaneous_ci(
     *, results: list[SimultaneousCIResult], alpha: float, out_dir: str, run_stem: str, latex: bool = False,
 ) -> list[str]:
+    """Write the simultaneous-CI run's results CSV (and LaTeX summary if
+    `latex=True`) under out_dir. Returns the written file paths."""
     out_base = Path(out_dir)
     out_base.mkdir(parents=True, exist_ok=True)
     csv_path = out_base / f"{run_stem}_simultaneous_ci_results.csv"
@@ -4194,6 +4233,10 @@ def save_simultaneous_ci_violin_vs_n_plot(*, results: list[SimultaneousCIResult]
 
 @dataclass
 class PPIResult:
+    """One (source, test) cell's calibration outcome from the PPI-corrected
+    sweep -- Type-I/coverage/power against the judge-bias source's true
+    effect."""
+
     name: str
     tag: str
     test: str
@@ -4811,6 +4854,9 @@ def run_ppi_simulation(
     sources: list[JudgeBiasSource], active_tests: list[str], n_reps: int, n_boot: int,
     progress_mode: str = "bar", seed: int = 42, n_workers: int = 1,
 ) -> list[PPIResult]:
+    """Sweep every requested PPI test over every JudgeBiasSource cell,
+    parallelized across n_workers, and flatten the per-cell PPIResult lists
+    into one list."""
     ss = np.random.SeedSequence(seed)
     child_seeds = [seq.generate_state(4).tolist() for seq in ss.spawn(len(sources))]
 
@@ -5385,6 +5431,9 @@ def run_ppi_effect_check(
 
 @dataclass
 class PPIComparisonResult:
+    """One cell comparing PPI against the naive/human-only/judge-only
+    baselines above, for a single representative estimand (paired_t)."""
+
     name: str
     tag: str  # "power" (vs. effect_size, reusing build_ppi_power_sources) | "compare_label_frac" (vs. label_frac)
     eval_type: str
@@ -6662,6 +6711,9 @@ def save_ppi_null_comparison_plot(
 
 @dataclass
 class LabelEfficiencyPoint:
+    """One label-efficiency measurement: a judge-quality tier x effect-size
+    x eval-type cell, with the resulting PPI/classical equivalence."""
+
     eval_type: str
     judge_noise: float
     """The calibrated llm_noise value actually simulated -- kept for
@@ -6697,14 +6749,30 @@ class LabelEfficiencyPoint:
     rather than plotting/averaging equiv_n_lab unconditionally."""
     n_reps: int
     saturated: bool = False
+    """True when `ppi_power` is at or above the classical reference curve's
+    own ceiling (power_grid.max()) -- inverting a power at or past a flat
+    curve's plateau is ill-posed (np.interp clamps to n_grid's upper edge
+    instead of raising). Saturated points are still shown (as a lower-bound
+    marker, not a real equivalent-N) but excluded from axis-limit
+    computation."""
     effect_frac: float = PPI_LABEL_EFF_EFFECT_FRAC
-    """Which arm of PPI_LABEL_EFF_EFFECT_FRACS this point came from. The
-    multiplier should be es-INVARIANT (it is a property of judge quality),
-    so this exists to make that checkable: per-es curves are plotted
-    separately alongside the pooled one, and this is a CSV column so the
-    arms stay separable after the fact."""
+    """Effect-size fraction this point was simulated at (see
+    PPIComparisonResult.effect_size for the convention) -- the arm of
+    PPI_LABEL_EFF_EFFECT_FRACS it came from. Defaulted to
+    PPI_LABEL_EFF_EFFECT_FRAC since run_ppi_label_efficiency_check holds it
+    fixed; run_ppi_nformula_check varies it instead, sweeping
+    PPI_NFORMULA_EFFECT_FRACS. Kept as a CSV column so per-es curves can be
+    checked separately from the pooled one, since the multiplier should be
+    es-invariant (a property of judge quality, not effect size)."""
     mult_lo: float = float("nan")
     mult_hi: float = float("nan")
+    """95% interval on the multiplier (equiv_n_lab / n_lab), from
+    propagating ppi_power's binomial SE through the reference curve's local
+    slope -- see _multiplier_ci. Reporting the multiplier without this
+    overstates its precision: at effect_frac=0.15/n_lab=15 the interval can
+    span [1.0, 5.3]. Covers binomial noise in ppi_power only; the reference
+    curve's own MC error is addressed by smoothing
+    (_smooth_monotone_power_curve) rather than by this interval."""
     rho2: float = float("nan")
     """Squared within-group Pearson correlation between judge score and human
     label, for the judge at this (eval_type, judge_noise) tier -- the SAME
@@ -6714,87 +6782,61 @@ class LabelEfficiencyPoint:
     `multiplier` and the theory it should follow sit on the same row."""
     predicted_mult: float = float("nan")
     """Control-variate prediction 1/(1 - rho2*(1 - n_lab/N)) from
-    _ppi_predicted_savings -- the exact finite-pool form, NOT the asymptotic
-    1/(1-rho2) (which overstates badly for a strong judge; see that function).
-    Note this predicts the VARIANCE-scale saving, whereas `multiplier` is
-    obtained by inverting a POWER curve and so saturates for strong judges --
-    expect predicted_mult >= multiplier at the top tiers rather than exact
+    _ppi_predicted_savings -- the exact finite-pool form, not the asymptotic
+    1/(1-rho2) (which overstates for a strong judge; see that function).
+    Predicts the variance-scale saving, whereas `multiplier` is obtained by
+    inverting a power curve and so saturates for strong judges -- expect
+    predicted_mult >= multiplier at the top tiers rather than exact
     agreement."""
     predicted_mult_asymptotic: float = float("nan")
     """1/(1 - rho2), the large-unlabeled-pool limit. Carried alongside the
-    exact form purely so a reader can see how far apart they are at this
-    design point; do not report it as the headline number."""
+    exact form so a reader can see how far apart they are at this design
+    point; not the headline number."""
     inversion_ratio: float = float("nan")
-    """What THIS cell's human-subset arm inverts to, divided by its own n_lab.
+    """What this cell's human-subset arm inverts to, divided by its own n_lab.
 
     The human-subset arm is a classical test on exactly n_lab labeled items,
     so a faithful inversion returns n_lab and this is 1.00. It involves no
     judge scores at all, which is what makes it usable as a filter: it
     measures the reference curve's local conditioning, not the quantity being
-    estimated.
-
-    Pooled over a whole sweep the inversion is close to unbiased (median
-    0.97-1.01 per eval_type x method on the 300-rep run), so the failure mode
-    is VARIANCE, not bias -- the same run spans 0.28 to 7.50 across cells.
-    That is why this is a gate (`well_conditioned`) rather than a divisor:
-    dividing the multiplier by it removes no bias and injects that spread
-    into every number. Measured, dividing pushed continuous paired_t from
-    0.029 to 0.083 mean deviation and created 5 cells above the
-    control-variate bound, which is impossible."""
-
+    estimated. This is a gate (`well_conditioned`), not a divisor: dividing
+    the multiplier by it removes no bias and injects its own spread into
+    every number."""
     inversion_clamped: bool = False
-    variance_multiplier: float = float("nan")
-    """Label-efficiency multiplier measured as Var(classical)/Var(PPI) across
-    replicates, with NO power curve involved.
-
-    The control-variate factor is a variance ratio by definition, so this
-    measures it directly instead of inverting a power curve to recover it. It
-    has no flat-curve regime, no clamping and no conditioning gate -- it
-    reports in every cell, including the ~26% the inverted multiplier discards.
-
-    Use it to CHECK `equiv_n_lab / n_lab`, not to replace it: the inverted
-    multiplier is in the unit a practitioner acts on ("this many labels"),
-    while this is the quantity the theory actually bounds. Where they disagree,
-    this is the trustworthy one -- on binary's top tier the inverted multiplier
-    ran 1.24-1.37x the control-variate bound, which is impossible, while this
-    read 0.94x of it. Validated against the bound directly: 0.996 of it for a
-    near-perfect judge (48.58x measured vs 48.80x predicted) and 0.944 at a
-    calibrated mid tier.
-
-    NaN on pooled-across-method rows: per-method estimands are on different
-    scales (a mean difference and a Walsh theta are not commensurable), so
-    their variances cannot be averaged -- only their ratios can."""
-    noise_family: str = "gaussian"
-    """Judge-error SHAPE this cell was simulated under -- "gaussian" or
-    "contaminated" (scenarios.synthetic.PPI_LABEL_EFF_NOISE_FAMILIES).
-
-    Crossed with the judge-QUALITY axis (alignment_value), not nested inside
-    it: total judge-error variance is held identical across families, so a
-    given alignment tier means the same thing in both and the two arms are
-    directly comparable at matched rho^2.
-
-    Exists because rank tests are sensitive to error shape and mean tests are
-    not. A gaussian-only sweep reports wilcoxon/mwu's WORST case as if it were
-    typical: Spearman runs below Pearson under gaussian judge noise and above
-    it under contaminated, so the rank penalty this sweep measures reverses
-    sign on a realistically erratic judge. See
-    notes/RANK_VS_PARAMETRIC_CROSSOVER.md."""
-    """Whether inversion_ratio came from a CLAMPED inversion and so carries no
+    """Whether inversion_ratio came from a clamped inversion and so carries no
     information about conditioning.
 
     _equivalent_n_lab inverts with np.interp, which clamps to n_grid's
     endpoints instead of extrapolating. The human-subset arm at the smallest
     n_lab has power near alpha, at or below the reference curve's left edge,
-    so its inversion pins to n_grid.min() == _JB_MIN_LAB == that same n_lab --
-    returning a ratio of exactly 1.000 no matter how ill-conditioned the cell
-    actually is. Measured on the 300-rep run, 53% of n_lab=15 cells returned
-    exactly 1.000 and NONE returned below it, against a median of 0.91 at
-    n_lab=20.
+    so its inversion pins to n_grid.min() -- returning a ratio of exactly
+    1.000 regardless of how ill-conditioned the cell actually is. A clamped
+    cell is therefore treated as unconditioned rather than trusted."""
+    variance_multiplier: float = float("nan")
+    """Label-efficiency multiplier measured as Var(classical)/Var(PPI) across
+    replicates, with no power curve involved.
 
-    That is a false pass in the worst-conditioned corner of the design
-    (smallest n_lab, smallest effect), which is exactly where the gate is
-    supposed to bite -- so a clamped cell is treated as unconditioned rather
-    than trusted."""
+    The control-variate factor is a variance ratio by definition, so this
+    measures it directly instead of inverting a power curve to recover it. It
+    has no flat-curve regime, no clamping, and no conditioning gate.
+
+    Use it to check `equiv_n_lab / n_lab`, not to replace it: the inverted
+    multiplier is in the unit a practitioner acts on ("this many labels"),
+    while this is the quantity the theory actually bounds.
+
+    NaN on pooled-across-method rows: per-method estimands are on different
+    scales (a mean difference and a Walsh theta are not commensurable), so
+    their variances cannot be averaged -- only their ratios can."""
+    noise_family: str = "gaussian"
+    """Judge-error shape this cell was simulated under -- "gaussian" or
+    "contaminated" (scenarios.synthetic.PPI_LABEL_EFF_NOISE_FAMILIES).
+
+    Crossed with the judge-quality axis (alignment_value), not nested inside
+    it: total judge-error variance is held identical across families, so a
+    given alignment tier means the same thing in both and the two arms are
+    directly comparable at matched rho^2. Exists because rank tests are
+    sensitive to error shape and mean tests are not -- see
+    notes/RANK_VS_PARAMETRIC_CROSSOVER.md."""
 
     @property
     def well_conditioned(self) -> bool:
@@ -6814,30 +6856,7 @@ class LabelEfficiencyPoint:
         if self.inversion_clamped:
             return False
         return not np.isfinite(self.inversion_ratio) or abs(self.inversion_ratio - 1.0) <= _INVERSION_DEV_TOL
-    """95% interval on the multiplier (equiv_n_lab / n_lab), from
-    propagating ppi_power's binomial SE through the reference curve's LOCAL
-    slope -- see _multiplier_ci. Reporting the multiplier without this
-    overstates its precision badly: at effect_frac=0.15/n_lab=15 the
-    interval routinely spans [1.0, 5.3], i.e. "no benefit" is not excluded.
-    Covers binomial noise in ppi_power ONLY; the reference curve's own MC
-    error is shared across every cell of an eval type and is addressed by
-    smoothing it (_smooth_monotone_power_curve) rather than by this
-    interval."""
-    """True when `ppi_power` is at or above the classical reference curve's
-    OWN ceiling (power_grid.max(), reached once the sample size is large
-    enough that adding more barely moves power further -- inevitable for an
-    "easy" eval type/effect-size combination, e.g. continuous's classical
-    test already exceeding 90% power at n=15). Inverting a power that's
-    at-or-past a flat curve's plateau is ill-posed: np.interp silently
-    clamps to n_grid's own upper edge instead of raising, which previously
-    produced e.g. "500 labels" (n_grid's cap) for a handful of low-noise
-    continuous cells -- a single such point then blew up save_ppi_label_
-    efficiency_plot's shared per-panel axis scale, squashing every real,
-    non-saturated point into an unreadable sliver near the origin (caught
-    from a screenshot: the continuous panel's axis ran to 500 while
-    likert/binary's ran to ~50-60). Saturated points are still shown (as a
-    lower-bound marker, not a real equivalent-N), but excluded from axis-
-    limit computation."""
+
     n: int = PPI_LABEL_EFF_N
     """Total item count this point was simulated at. Defaulted to
     PPI_LABEL_EFF_N for backward compatibility with run_ppi_label_
@@ -6845,12 +6864,6 @@ class LabelEfficiencyPoint:
     -- run_ppi_nformula_check is the only caller that varies it, sweeping
     PPI_NFORMULA_N_VALUES to test whether the label-efficiency multiplier
     needs an explicit N term (see that function's docstring)."""
-    effect_frac: float = PPI_LABEL_EFF_EFFECT_FRAC
-    """Eval-type-relative effect-size fraction this point was simulated at
-    (see PPIComparisonResult.effect_size's docstring for the convention).
-    Defaulted to PPI_LABEL_EFF_EFFECT_FRAC for the same backward-
-    compatibility reason as `n` -- run_ppi_nformula_check sweeps PPI_
-    NFORMULA_EFFECT_FRACS instead of holding this fixed."""
 
 
 _POWER_CURVE_CACHE_VERSION = 1
@@ -7018,60 +7031,12 @@ _INVERSION_DEV_TOL = 0.25
 """How far a cell's human-subset arm may invert from its own n_lab and still
 be reported (see LabelEfficiencyPoint.inversion_ratio/well_conditioned).
 
-**RE-TUNED 0.15 -> 0.25 on 2026-08-18.** The original 0.15 was calibrated
-against per-method curves built at the WRONG effect size (see
-"The root cause" section of this note's companion,
-HOW_MULTIPLIERS_ARE_MEASURED.md, and commit a57906a). Those curves made the
-inversion systematically biased -- medians of 0.375 / 1.621 / 2.881 by eval
-type against a target of 1.000 -- so a tight gate was the only thing keeping
-the numbers sane, and the tolerance was in effect compensating for a bug.
-
-With correct curves the inversion is unbiased (median exactly 1.000 for all
-three eval types), so the gate now only has variance to remove, and it was
-removing far more data than necessary. Swept on the fixed 60-rep run,
-attainment is flat while retention nearly doubles:
-
-    tol    kept    paired_t  wilcoxon   mwu   ttest_welch
-    0.15   34.6%      0.992     0.976  0.926        0.991
-    0.20   42.7%      0.999     0.980  0.919        0.975
-    0.25   50.0%      1.008     0.975  0.928        0.975
-    0.30   55.1%      1.010     0.973  0.927        0.974
-    0.40   62.7%      1.021     0.966  0.915        0.974
-    0.60   70.6%      1.028     0.972  0.900        0.967
-
-0.25 keeps 50% against 0.15's 34.6% and moves no method's attainment by more
-than 0.016. The upper limit is set by `paired_t`: past 0.30 it drifts above
-1.000, which is impossible -- no estimator beats its own control-variate
-bound -- so that drift is contamination from ill-conditioned cells leaking
-back in, and it is the signal that the gate has been loosened too far.
-
-At higher rep counts the deviation shrinks as 1/sqrt(reps), so this same
-tolerance retains more: the 60-rep deviations scaled to 300 reps put expected
-retention near 70%.
-
-The ORIGINAL calibration note, retained because the method is still the right
-one even though the numbers it produced were measured on broken curves:
-
-Chosen from the 300-rep sweep by sweeping the gate and watching where each
-method's measured/predicted ratio settles. Tightening it monotonically pulls
-in the cells that the flat part of the power curve had distorted, and leaves
-the already-clean methods alone:
-
-    gate      kept   continuous wilcoxon   continuous paired_t   likert mwu
-    none      2243   0.81 (dev 0.194)      1.03 (dev 0.029)      0.83 (0.168)
-    0.25      1910   0.87 (dev 0.133)      1.02 (dev 0.030)      0.84 (0.161)
-    0.15      1525   0.90 (dev 0.096)      1.02 (dev 0.026)      0.85 (0.150)
-    0.10      1223   0.93 (dev 0.072)      1.01 (dev 0.035)      0.87 (0.132)
-
-0.15 keeps ~68% of cells. Going tighter buys continuous wilcoxon a little
-more and starts costing paired_t precision as the surviving cell count falls.
-
-Note what does NOT happen: likert mwu improves but plateaus around 0.85-0.87
-rather than converging to 1.00. That is the intended behaviour -- an
-independent variance-scale measurement (no power curve, no inversion) puts
-likert mwu at 1.18-1.24x its own control-variate bound, a genuine
-discreteness cost in the estimator. The gate is meant to remove measurement
-artifact, not real shortfall, and here it demonstrably separates the two."""
+The inversion is unbiased (median exactly 1.000 across eval types), so this
+tolerance only needs to remove variance, not bias. 0.25 roughly doubles
+retention versus a tighter 0.15 gate at negligible attainment cost; past
+0.30, paired_t's measured/predicted ratio drifts above 1.000, which is
+impossible for a control variate, so that is the practical upper bound. See
+notes/HOW_MULTIPLIERS_ARE_MEASURED.md for the full calibration sweep."""
 
 
 def _check_inversion_self_consistency(
@@ -7216,8 +7181,7 @@ Also suppresses the in-figure footnote strip (the fig.text() line under each
 axes explaining what the bands and points are). That is a subcaption, and a
 figure with both a subcaption and a LaTeX caption makes the reader check two
 places for one explanation -- so the flag moves that content into the caption
-too. Anything suppressed here MUST be restated in the LaTeX caption; see
-paper/appendix_label_efficiency.tex.
+too. Anything suppressed here must be restated in the figure's LaTeX caption.
 
 Panel labels (Binary/Continuous/Likert, the four design names in the lookup
 grid) are NOT titles in this sense and are always drawn -- they identify axes
@@ -7596,18 +7560,13 @@ def run_ppi_label_efficiency_check(
     # overlap deliberately -- the multiplier should be es-invariant, so
     # agreement across arms on shared n_lab cells is a robustness check.
     # Grid the classical reference curve is tabulated on. _equivalent_n_lab
-    # inverts this curve with np.interp, which CLAMPS at the endpoints -- so
-    # this cap is a hard ceiling on any reportable multiplier
-    # (multiplier = equiv_n_lab / n_lab, hence max reportable = cap / n_lab).
-    # At the old cap of 500 that ceiling bit hardest exactly where the method
-    # looks best: binary's kappa=0.80 tier reached a true multiplier of ~4x,
-    # needing equiv ~800 at n_lab=200, but could only ever report 500/200 =
-    # 2.50x -- so the BEST-performing eval type was silently truncated into
-    # looking WORSE than likert. Measured on the reps=200 sweep: every clipped
-    # cell returned exactly 500.0 across all four effect-size arms despite
-    # powers ranging 0.795-1.000, which is the clamp, not a measurement.
-    # 1500 gives headroom past binary's ~800; the extra grid points keep
-    # low-end resolution despite the wider span.
+    # inverts this curve with np.interp, which clamps at the endpoints, so
+    # this cap is a hard ceiling on any reportable multiplier (multiplier =
+    # equiv_n_lab / n_lab). A cap of 500 silently truncated binary's
+    # best-performing tier (true multiplier ~4x, needing equiv ~800 at
+    # n_lab=200) into looking worse than likert. 1500 gives headroom past
+    # binary's ~800; the extra grid points keep low-end resolution despite
+    # the wider span.
     n_grid = np.geomspace(float(_JB_MIN_LAB), 1500.0, 36)
     for effect_frac in PPI_LABEL_EFF_EFFECT_FRACS:
         cont_likert_sources = build_ppi_label_efficiency_sources(
@@ -7842,19 +7801,8 @@ def run_ppi_nformula_check(
     # One classical reference curve per (eval_type, effect_frac) -- NOT per
     # N (see docstring above) -- precomputed once and reused across every
     # N/alignment-target row at that (eval_type, effect_frac).
-    # Grid the classical reference curve is tabulated on. _equivalent_n_lab
-    # inverts this curve with np.interp, which CLAMPS at the endpoints -- so
-    # this cap is a hard ceiling on any reportable multiplier
-    # (multiplier = equiv_n_lab / n_lab, hence max reportable = cap / n_lab).
-    # At the old cap of 500 that ceiling bit hardest exactly where the method
-    # looks best: binary's kappa=0.80 tier reached a true multiplier of ~4x,
-    # needing equiv ~800 at n_lab=200, but could only ever report 500/200 =
-    # 2.50x -- so the BEST-performing eval type was silently truncated into
-    # looking WORSE than likert. Measured on the reps=200 sweep: every clipped
-    # cell returned exactly 500.0 across all four effect-size arms despite
-    # powers ranging 0.795-1.000, which is the clamp, not a measurement.
-    # 1500 gives headroom past binary's ~800; the extra grid points keep
-    # low-end resolution despite the wider span.
+    # Grid cap of 1500 -- same reasoning as run_ppi_label_efficiency_check's
+    # n_grid (a lower cap silently truncates binary's best-performing tier).
     n_grid = np.geomspace(float(_JB_MIN_LAB), 1500.0, 36)
     ref_curves: dict[tuple[str, float], np.ndarray] = {}
     for eval_type, _sources, methods, _name_re in groups:
@@ -8146,7 +8094,7 @@ def run_ppi_rho_drift_check(
     only_methods: tuple[str, ...] | None = None,
     shape_label: str | None = None,
 ) -> tuple[list[RhoDriftPoint], list[tuple]]:
-    """Is rho^2 a property of the JUDGE, or of the judge AND the design?
+    """Is rho^2 a property of the judge, or of the judge and the design?
 
     Every label-efficiency number in this harness assumes the former:
     _method_rho2 builds its cell at effect_size=0.0 and caches on
@@ -8155,39 +8103,25 @@ def run_ppi_rho_drift_check(
     PPI_RHO_DRIFT_ALIGNMENT_TARGET and sweeping the true effect, then
     inverting the measured multiplier back to the rho^2 it implies.
 
-    The assumption holds EXACTLY for the mean-type estimands and fails for
-    every rank/dominance one, because PPI's variance reduction is 1 - rho^2
-    with rho correlating INFLUENCE FUNCTIONS: for a mean psi(y) = y - mu, so
-    rho is a plain Pearson correlation that a location shift cannot move,
-    while rank and dominance estimands have psi involving the CDF, whose shape
-    changes as the groups separate. Reference values from the standalone
-    investigation this check productionises (judge r = 0.8, d = 0 -> 2):
+    The assumption holds exactly for mean-type estimands and fails for
+    rank/dominance ones: PPI's variance reduction is 1 - rho^2 with rho
+    correlating influence functions, and a mean's psi(y) = y - mu makes rho a
+    plain Pearson correlation a location shift cannot move, while rank and
+    dominance estimands have psi involving the CDF, whose shape changes as
+    groups separate. Expect the mean-type methods (ttest, paired_t) to come
+    back flat and the rank ones (mwu, wilcoxon) to fall -- a mean-type method
+    showing drift is a bug in the measurement, not a finding, since its
+    invariance is exact algebra and doubles as this check's own control.
+    Spearman-based recipes (mwu, wilcoxon, kruskal) are shift-invariant, so
+    they stand still while the true rho2 falls beneath them; friedman's
+    recipe (mean per-participant Spearman on within-row ranks) is not even
+    shift-invariant and moves the opposite direction, rising as the truth
+    falls.
 
-        ttest, paired_t     flat to 4 dp      <- measured here
-        mwu -12.8%, wilcoxon -25.4%           <- measured here
-
-    Those are the STANDALONE study's numbers at judge r = 0.8. This check runs
-    at PPI_RHO_DRIFT_ALIGNMENT_TARGET (0.64), a weaker judge, and does not
-    reproduce them exactly -- at 2000 reps it reads mwu -11.1% and wilcoxon
-    -7.3% over d = 0 -> 2. mwu lines up; wilcoxon does not, and the gap is
-    judge quality, not a defect. Do not read the two sets as the same
-    measurement. Against each method's own rho2_score the split is cleaner and
-    is what the paper's fig:le-esinv plots: mean-type within 3%, rank-type
-    -14.2% (mwu) and -16.7% (wilcoxon).
-        anova_rep flat; kruskal -13.9%;       <- NOT measured here, see the
-        friedman -38.2%                          method-selection comment below
-
-    Expect the two mean-type methods to come back flat and the two rank ones
-    to fall. A mean-type method showing drift is a bug in the measurement, not
-    a finding -- its invariance is exact algebra, so it doubles as this
-    check's own control.
-
-    The named recipes cannot track that: Spearman is shift-invariant, so for
-    mwu/wilcoxon/kruskal it stands still while the target falls away beneath
-    it, and friedman's (mean per-participant Spearman, computed on within-row
-    ranks) is not shift-invariant at all -- it RISES ~94% as the truth falls.
-    Hence rho2_recipe alongside rho2_implied here: the gap between the two
-    columns is the finding, not either column alone.
+    Reports both rho2_recipe (the named recipe's value) and rho2_implied
+    (inverted from the measured multiplier) -- the gap between them is the
+    finding. See notes/omnibus_label_efficiency.html for the full measurement
+    this check productionizes.
 
     Returns (points, calib_rows) -- calib_rows in the same shape
     run_ppi_label_efficiency_check emits, so it can reuse
@@ -8729,6 +8663,8 @@ def print_ppi_nformula_report(results: list[LabelEfficiencyPoint]) -> None:
 def save_results_artifacts_ppi_label_efficiency(
     *, results: list[LabelEfficiencyPoint], out_dir: str, run_stem: str,
 ) -> list[str]:
+    """Write the label-efficiency run's results CSV under out_dir. Returns
+    the written file paths."""
     out_base = Path(out_dir)
     out_base.mkdir(parents=True, exist_ok=True)
     csv_path = out_base / f"{run_stem}_ppi_label_efficiency_results.csv"
@@ -9444,131 +9380,37 @@ _METHOD_CORR_KIND = {
 """Which correlation governs each method's PPI variance reduction.
 
 PPI++ is a control variate, so the variance reduction is 1 - rho^2 where rho
-correlates the INFLUENCE FUNCTIONS of the labeled estimator and the
-judge-based rectifier. Two things therefore vary by method, and using one
-number for all of them is wrong:
+correlates the influence functions of the labeled estimator and the
+judge-based rectifier. Two things vary by method:
 
 STRUCTURE. A paired test's estimand is a function of the differences
-D = Y_x - Y_y, so its control variate is Dhat = f_x - f_y and the relevant
-correlation is between those, not between the raw scores. These are not the
-same number -- measured on likert at the rho^2=0.70 tier, score-level rho^2 is
-0.700 while Pearson(D, Dhat)^2 is 0.552, because differencing two noisy
-measurements changes the signal-to-noise ratio (and likert's discretisation
-compounds it).
+D = Y_x - Y_y, so its control variate is Dhat = f_x - f_y and rho is
+Pearson(D, Dhat), not the score-level correlation -- differencing two noisy
+measurements changes the signal-to-noise ratio.
 
 ESTIMAND. A mean-type test has an influence function linear in the values, so
 Pearson is exact. A rank-type test (wilcoxon, mwu) has an influence function
-that is a function of RANKS -- for the signed-rank statistic the Hajek
-projection is 1 - F_D(-d) - theta -- so the governing quantity is the grade
-correlation, i.e. Spearman. That identification is exact under H0 when D and
-Dhat are each symmetric about 0 (then F_D(-D) = 1 - F_D(D), and the reflection
-cancels out of the correlation) and first-order under the local alternatives
-power analysis lives in; away from that regime it is a Spearman-like grade
-correlation of the reflected transforms rather than Spearman exactly.
+that is a function of ranks -- for the signed-rank statistic the Hajek
+projection is 1 - F_D(-d) - theta -- so the governing quantity is Spearman
+instead, exact under H0 and first-order under local alternatives.
 
-Applying this fixed two anomalies that score-level rho^2 produced: continuous
-paired_t read 1.08-1.24x its predicted bound (impossible for a control
-variate) and now reads ~1.00, and likert wilcoxon's ratio drifted 0.82 -> 0.65
-across the tiers and is now flat at ~0.90. The residual gap for rank tests is
-real, but it is a level, not a drift.
+The four omnibus methods (anova_ind, anova_rep, friedman, kruskal) are
+deliberately absent: no omnibus recipe was validated in this codebase when
+this table was built. See notes/omnibus_label_efficiency.html for the
+validated recipes (group/double structures, effect-size handling) needed to
+add them.
 
-TODO -- THE FOUR OMNIBUS METHODS (anova_ind, anova_rep, friedman, kruskal)
-ARE DELIBERATELY ABSENT. 4571c6e routed 3+ conditions through pairwise
-comparisons rather than guess at an omnibus formula, on the grounds that no
-omnibus formula was validated anywhere in this codebase. It has since been
-measured -- see notes/omnibus_label_efficiency.html (8000 reps/cell,
-k in {3,4,5,7}, seven judge pathologies, recipes verified by inverting
-N_eff = N_lab/(1 - rho^2 (1 - N_lab/N)) back to the rho^2 the data implies).
-Wiring them up needs three things:
-
-1. THE ENTRIES.
-
-       "anova_ind": ("group",  "pearson")
-       "kruskal":   ("group",  "spearman")
-       "anova_rep": ("double", "pearson")     # new structure, see (2)
-       "friedman":  ("double", "spearman")    # new structure, on RANKS
-
-   "group" already does the right thing for the independent pair -- centre
-   each condition on its own mean, then pool -- it only needs generalising
-   past the two hardcoded groups (truth_a2/truth_b2) to k of them. Do NOT
-   substitute "average the per-condition correlations": the algebra sums
-   covariances and variances rather than averaging their ratios, and
-   averaging over-predicts N_eff by 19% (168 vs a measured 141) as soon as
-   one condition's judge is noisier than the others. For kruskal that pooled
-   fix is unavailable -- ranking within a condition equalises the variances
-   pooling needs, so pooled and averaged coincide -- and the harmonic mean of
-   the per-condition rho_S^2 is the better estimator there (measured 139 vs
-   142 on the same cell where averaging reads 163).
-
-2. A NEW "double" STRUCTURE, for the two repeated-measures methods:
-   row-centre each subject's k values AND column-centre each condition, on
-   the human and judge matrices alike, then pool every cell into one
-   correlation. For friedman, rank each subject's row FIRST and column-centre
-   the ranks. Row-centring alone -- which is what the paper's footnote
-   currently says, and the obvious thing to reach for -- leaves the
-   between-condition means in. Judge and human share those means exactly, so
-   pooling scores them as agreement, but they carry no CROSS-SUBJECT variance
-   and cross-subject variance is the only variance the test's denominator
-   sees; the judge ends up credited for reproducing the very effect under
-   test. At k=5, d=1.0 that promises 445 effective labels against a measured
-   240 (anova_rep) and 310 against 156 (friedman).
-
-3. THE EFFECT-SIZE LANDMINE (see the standing caveat below -- it already
-   applies to wilcoxon/mwu, and applies harder to friedman/kruskal).
-   anova_rep is the one omnibus addition free of it.
-
-   Relatedly, N_lab counts SUBJECTS and not labeled cells for anova_rep and
-   friedman, and their labeling must cover complete subject rows.
-
-CAVEAT ON THE ENTRIES ALREADY HERE -- rho IS NOT EFFECT-INVARIANT FOR THE
-RANK METHODS, and _method_rho2 assumes it is (it builds its cell at
-effect_size=0.0 and caches on (eval_type, judge_noise, method), with no
-effect-size term). Measured with judge quality HELD FIXED at r=0.8 while the
-true effect d varies, rho^2 recovered by inverting the measured multiplier:
-
-    method     d=0      d=0.5    d=1.0    d=2.0     drift
-    ttest      0.6292   0.6292   0.6292   0.6292    -0.0%   <- exact
-    paired_t   0.6502   0.6502   0.6502   0.6502    +0.0%   <- exact
-    anova_rep  0.6419   0.6419   0.6419   0.6419    +0.0%   <- exact
-    mwu        0.6043   0.5997   0.5839   0.5267   -12.8%
-    kruskal    0.6082   0.5985   0.5766   0.5235   -13.9%
-    wilcoxon   0.6250   0.6163   0.5859   0.4664   -25.4%
-    friedman   0.4181   0.3907   0.3591   0.2583   -38.2%
-
-The split is MEAN vs RANK, not omnibus vs pairwise. It is not a contradiction
-of PPI theory: variance reduction is 1 - rho^2 with rho correlating INFLUENCE
-FUNCTIONS, and for a mean psi(y)=y-mu makes rho a plain Pearson correlation,
-invariant to a location shift (hence exactly flat). Rank and dominance
-estimands have psi involving the CDF, whose shape changes as the groups
-separate. What is violated is only the assumption that rho is a property of
-the JUDGE ALONE; for rank estimands it is a property of the judge AND the
-design.
-
-The recipes in this dict are effect-invariant BY CONSTRUCTION -- Spearman is
-unchanged by a location shift -- so they do not track that decline. Measured
-flat at 0.6175 (wilcoxon) and 0.6169 (mwu) across the whole d range, against
-a truth that falls, the N_eff error is:
-
-    wilcoxon  -1.5% at d=0  ->  +6.4% at d=1  ->  +30.6% at d=2
-    mwu       +2.5%         ->  +6.7%         ->  +18.2%
-
-This was never caught because PPI_LABEL_EFF_EFFECT_FRACS sweeps only
-0.15-0.35, where the drift is ~0.3% -- the existing es-invariance validation
-is not wrong, just scoped to small effects. Note the null is exactly where
-the effect-invariant recipe and the truth COINCIDE, so no null-only check can
-catch this. Fixing it means threading effect_size into _method_rho2's cell
-and cache key for the rank methods.
-
-Mechanism, if it needs re-deriving: the rank atom SATURATES. As the groups
-separate almost every row lands in the true order, so the residual variation
-is carried by rare order flips, and the human's flip mass shrinks faster than
-the judge's (the judge's difference carries extra variance, so at the same
-threshold it sits further out on a wider distribution) -- the two sides'
-flips decouple. Confirmed by a noiseless judge showing NO drift at all
-(multiplier ~10.2-10.4, rho^2 ~ 1.00 out to d=4), by drift scaling with judge
-noise (-32% at r=.95, -59% at r=.8, -75% at r=.6), and by t3 errors cutting
-friedman's drift from -62% to -13% (polynomial tails keep the two flip masses
-comparable). See notes/omnibus_label_efficiency.html."""
+Caveat on the entries already here: rho is not effect-invariant for the rank
+methods (wilcoxon, mwu, kruskal, friedman), and _method_rho2 assumes it is
+(builds its cell at effect_size=0.0, caches with no effect-size term). Mean
+methods (ttest, paired_t, anova_rep) are exactly effect-invariant by
+construction (Pearson on a linear influence function is location-invariant);
+rank/dominance estimands' influence functions involve the CDF, whose shape
+changes as groups separate, so their effect-invariant Spearman recipe
+increasingly overstates rho^2 (and hence N_eff) as the true effect grows.
+This is undetected within PPI_LABEL_EFF_EFFECT_FRACS' small-effect sweep
+range; see notes/omnibus_label_efficiency.html for the full measurement and
+for threading effect_size into _method_rho2's cache key as the fix."""
 
 
 @functools.lru_cache(maxsize=None)
@@ -12309,6 +12151,8 @@ def latex_ppi_overall_summary(results: list[PPIResult], alpha: float) -> str:
 
 
 def save_results_artifacts_ppi(*, results: list[PPIResult], alpha: float, out_dir: str, run_stem: str, latex: bool = False, regime: str = "") -> list[str]:
+    """Write the PPI run's results CSV (and LaTeX summary if `latex=True`)
+    under out_dir. Returns the written file paths."""
     out_base = Path(out_dir)
     out_base.mkdir(parents=True, exist_ok=True)
     csv_path = out_base / f"{run_stem}_ppi_results.csv"
@@ -12703,6 +12547,8 @@ def print_ppi_power_report(results: list[PPIResult], alpha: float, header: str =
 
 
 def save_results_artifacts_ppi_power(*, results: list[PPIResult], alpha: float, out_dir: str, run_stem: str) -> list[str]:
+    """Write the PPI power-sweep results CSV under out_dir. Returns the
+    written file paths."""
     out_base = Path(out_dir)
     out_base.mkdir(parents=True, exist_ok=True)
     csv_path = out_base / f"{run_stem}_ppi_power_results.csv"
@@ -12948,6 +12794,8 @@ def save_results_artifacts_ppi_power_nlab_grid(
     *, results: list[PPIResult], alpha: float, out_dir: str, run_stem: str,
     header: str = "bias reinforcing effect",
 ) -> list[str]:
+    """Write the PPI power-vs-n_lab grid results CSV under out_dir. Returns
+    the written file paths."""
     out_base = Path(out_dir)
     out_base.mkdir(parents=True, exist_ok=True)
     csv_path = out_base / f"{run_stem}_ppi_power_nlab_grid_results.csv"
@@ -13252,6 +13100,8 @@ def latex_ppi_effect_overall_summary(results: list[PPIEffectResult], alpha: floa
 
 
 def save_results_artifacts_ppi_effect(*, results: list[PPIEffectResult], alpha: float, out_dir: str, run_stem: str, latex: bool = False, regime: str = "") -> list[str]:
+    """Write the PPI effect-size-sweep results CSV (and LaTeX summary if
+    `latex=True`) under out_dir. Returns the written file paths."""
     out_base = Path(out_dir)
     out_base.mkdir(parents=True, exist_ok=True)
     csv_path = out_base / f"{run_stem}_ppi_effect_results.csv"
@@ -13408,6 +13258,9 @@ def save_ppi_effect_plot(
 
 
 def add_arguments(parser: argparse.ArgumentParser) -> None:
+    """Register this case's CLI flags: which of the four sweep modes to run,
+    sample sizes/reps/effect sizes, data source, and output options -- see
+    `run()` for how `--mode` resolves to the sweeps actually executed."""
     parser.add_argument("--mode", choices=MODES, default="all",
                          help="'pairwise' (non-PPI A/B), 'multiarm' (non-PPI k-arm), "
                               "'ppi' (PPI-corrected calibration), 'simultaneous_ci' (none vs. Bonferroni vs. "
@@ -14335,6 +14188,11 @@ def quick_args(base_seed: int = 43, data_source: str = "synthetic") -> argparse.
 
 
 def run(args: argparse.Namespace) -> CaseResult:
+    """Case entry point. Resolves `args.mode` ("all"/"pairwise_multiarm"/a
+    single mode) to the applicable set of {pairwise, multiarm, ppi,
+    simultaneous_ci} sweeps for `args.data_source`, builds sources, runs
+    each sweep, prints its console report, writes CSV/LaTeX artifacts, and
+    returns a CaseResult summarizing what ran and where the outputs went."""
     # Publication figures: drop the in-figure title and footnote strip that
     # the LaTeX caption already carries. Mutates the module global rather
     # than the environment because PPI_NO_FIGURE_TITLES is read at import,

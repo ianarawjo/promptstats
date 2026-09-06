@@ -1015,6 +1015,12 @@ def official_variants(base_seed: int = 42) -> list[tuple[str, argparse.Namespace
 
 
 def official_args(base_seed: int = 42) -> argparse.Namespace:
+    """Canonical official-test preset: every panel and variant, at
+    add_arguments' own CLI defaults (reps=1000, bootstrap_n=30,
+    alignment_mc=20000) -- the one deliberate override is
+    progress="plain" instead of "bar", since an official run's output is
+    typically captured to a log file, where a redrawing progress bar is
+    noise rather than signal."""
     return argparse.Namespace(
         panels=[panel_id(e, l) for e, l in PANELS], variants=None,
         reps=1000, bootstrap_n=30, alignment_mc=20000, seed=base_seed,
@@ -1034,23 +1040,10 @@ def quick_args(base_seed: int = 43, data_source: str = "synthetic") -> argparse.
 _SEC_PER_CELL_FIXED = 2.60
 _SEC_PER_BOOT_DRAW = 0.0085
 """Measured cost model: wall-clock seconds per cell at reps=1000 on 15
-workers is ``_SEC_PER_CELL_FIXED + _SEC_PER_BOOT_DRAW * n_boot``.
-
-The n_boot slope is fitted to 10-cell microbenchmarks at (20, 3.31),
-(100, 4.22), (400, 6.54), (1000, 11.0) s/cell. That split matters for
-choosing defaults and is easy to misread: at n_boot=1000 the bootstrap is
-~70% of the cost, which makes it look like the dominant lever, but at the
-default it is under 10% and the FIXED term -- five classical tests x reps,
-plus PPI's non-bootstrap work -- is what sets the runtime. The real levers
-are `reps` and the grid size, not n_boot.
-
-The FIXED term is deliberately NOT the microbenchmark's intercept (3.14).
-A real 5420-cell run at reps=80 on 12 workers took 21.5 min, which implies
-~2.4 s/cell at reps=1000 on 15 workers -- the small batches paid per-batch
-pool overhead the full grid amortizes away. 2.60 splits the difference,
-leaning conservative: extrapolating from reps=80 assumes the per-cell setup
-that does NOT scale with reps is negligible, which biases the other way.
-Treat the printed estimate as +-30%, which is all it is for."""
+workers is ``_SEC_PER_CELL_FIXED + _SEC_PER_BOOT_DRAW * n_boot``. At the
+default n_boot the FIXED term -- five classical tests x reps, plus PPI's
+non-bootstrap work -- dominates, so `reps` and the grid size are the real
+runtime levers, not n_boot. Treat the printed estimate as +-30%."""
 
 
 def estimate_runtime_s(n_cells: int, reps: int, n_boot: int, n_workers: int) -> float:
@@ -1063,6 +1056,11 @@ def estimate_runtime_s(n_cells: int, reps: int, n_boot: int, n_workers: int) -> 
 
 
 def run(args: argparse.Namespace) -> CaseResult:
+    """Case entry point: build the (panel x variant x bias x noise) cell grid
+    from *args*, print a runtime estimate, run the sweep, locate each
+    panel/metric's false-positive peak, print/save the report, save the
+    grid and peak-shift plots per panel, and return a CaseResult
+    summarizing the peak metric range per panel."""
     t0 = time.time()
     try:
         warnings.filterwarnings("ignore")

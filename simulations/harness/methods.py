@@ -91,35 +91,30 @@ boundary shows a nonzero diff. At small N it's entirely plausible NONE of
 the sampled items are boundary-adjacent, so the sample's diffs come out
 literally constant, collapsing the sample variance to ~0 regardless of the
 (real, nonzero) population-level diff variance -- any variance-based CI
-built from that is catastrophically overconfident. Confirmed via
-simulations/investigate_likert_family_wise_smalln.py: plain logit_t's
-family-wise (Sidak-widened, k=10 arms) coverage was 14.5% at n=10 (vs. 95%
-nominal); logit_t_dither recovered to a stable ~92% across n=10-60. NOT the
-same mechanism LOGIT_T_2ND targets (that's single-sample boundary-hugging
-skew) and does NOT help ci_single -- see that file's own likert check,
-which showed plain logit_t already well-calibrated there (worst case 93.8%
-at n=10) -- this is a paired-diff-specific pathology. nig_ci_1d fixes the
-SAME failure via a wider prior instead, but was found to cost FAR more:
-near-zero power at small N/moderate k (0.2% at k=3, n=10) vs. dithering's
-much smaller power cost, because nig's conservatism is unconditional while
-dithering targets the actual missing variance directly.
+built from that is catastrophically overconfident. Dithering recovers
+near-nominal coverage where plain logit_t badly under-covers in this
+regime. NOT the same mechanism LOGIT_T_2ND targets (that's single-sample
+boundary-hugging skew) and does NOT help ci_single, where plain logit_t is
+already well-calibrated -- this is a paired-diff-specific pathology.
+nig_ci_1d fixes the SAME failure via a wider prior instead, but costs far
+more power at small N/moderate k, because nig's conservatism is
+unconditional while dithering targets the actual missing variance
+directly.
 
-Also tried on CONTINUOUS data with a hardcoded +-0.5 jitter (for
-transparency/direct comparison against likert) and that was BROKEN: +-0.5
-is calibrated to undo exactly one unit of INTEGER rounding, but on
-continuous's own [0, 1]-scale data it's HALF the entire range, causing
-heavy boundary clipping and a systematic bias in the mean. Unlike random
-noise, that bias doesn't shrink with N while the CI does, so coverage got
-WORSE as N grows rather than converging: 0.936 -> 0.800 (n=10 -> n=100) in
-nested-mode screening. Replacing the hardcoded width with
-_detect_dither_halfwidth's data-driven detection fixes this generally: it
-returns 0.0 (no jitter, dither variant reduces exactly to its base method)
-on genuinely continuous data with no recurring gap, so it's now safe to
-run on any non-binary type, and it ALSO catches the case a fixed
-eval_type check never could -- data labeled "continuous" that's actually
-coarse in practice (e.g. a judge that only emits a handful of distinct
-values), which would otherwise silently re-trigger the same rounding-
-cancellation pathology likert has."""
+A hardcoded +-0.5 jitter (for transparency/direct comparison against
+likert) does NOT work on CONTINUOUS data: +-0.5 is calibrated to undo
+exactly one unit of INTEGER rounding, but on continuous's own [0, 1]-scale
+data it's HALF the entire range, causing heavy boundary clipping and a
+systematic bias in the mean that doesn't shrink with N while the CI does,
+so coverage gets WORSE as N grows rather than converging. Replacing the
+hardcoded width with _detect_dither_halfwidth's data-driven detection
+fixes this generally: it returns 0.0 (no jitter, dither variant reduces
+exactly to its base method) on genuinely continuous data with no
+recurring gap, so it's now safe to run on any non-binary type, and it ALSO
+catches the case a fixed eval_type check never could -- data labeled
+"continuous" that's actually coarse in practice (e.g. a judge that only
+emits a handful of distinct values), which would otherwise silently
+re-trigger the same rounding-cancellation pathology likert has."""
 
 BINARY_SINGLE_EXTRA_METHODS = [WILSON, JEFFREYS, WALD, CLOPPER_PEARSON, BAYES_SINGLE]
 CONTINUOUS_EXTRA_METHODS = [BETA, LOGIT_T, NIG, EL]
@@ -569,14 +564,10 @@ TTEST_WELCH = Method("ttest_welch", "#d62728")
 # for ppi_t_interval/ppi_logit_t (this estimand, mean(a_i - b_i), is
 # identical to theirs; only Tango's Wilson-style effective-n CI shape
 # differs). Kept selectable for direct comparison and for reproducing
-# pre-flip results, not because it's still recommended: a harness-scale
-# validation (--mode ppi --eval-types binary, 65 scenarios, two seeds)
-# found zero Holm-confirmed miscalibrated cells at either setting, with
-# power_tune=True giving ~13-17% narrower mean CI width and no coverage
-# cost at MCAR or MNAR labeling -- see simulations/investigate_tango_ppi_
-# plus_plus*.py and simulations/investigate_compound_ppi_fwer_power.py
-# (the compound PPI+FWER path's own detection-power measurement) for the
-# validation behind the flip.
+# pre-flip results, not because it's still recommended: power_tune=True
+# gives a meaningfully narrower mean CI width with no coverage cost at
+# MCAR or MNAR labeling, and neither setting showed calibration problems
+# in validation.
 MJ_FLOOR_FIXED_LAMBDA = Method("mj_floor_fixed_lambda", "#41b6c4")  # teal -- distinct from MJ_FLOOR's default grey
 # MWU family: five PPI corrections for the same classical test (Mann-Whitney
 # U / independent two-group mid-rank estimand P_mid(A>B)-0.5), matching

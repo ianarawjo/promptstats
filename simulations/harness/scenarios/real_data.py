@@ -8,11 +8,15 @@ i.i.d.-without-replacement subsample of size n from the corpus, and
 ``cases/ci_single.py`` run one simulation loop over either synthetic or real
 sources.
 
-Two real sources are available: "openeval" (downloaded from the HuggingFace
-Hub on first use, then cached) and "inspect" (a CSV of locally-run benchmark
-results produced by ``simulations/collect_inspect_benchmarks.py``). "real"
-combines both for maximum real-data diversity, skipping "inspect" with a
-warning (rather than failing) if its CSV isn't present locally.
+Five single-arm sources are available: "openeval" (downloaded from the
+HuggingFace Hub on first use, then cached), "inspect" (a CSV of locally-run
+benchmark results produced by ``simulations/collect_inspect_benchmarks.py``),
+"appstore" (real human 1-5 star ratings, likert), "privacy_judge" (real
+human 1-5 survey-mean scores, continuous), and "real", which combines
+openeval + inspect + privacy_judge for maximum real-data diversity, skipping
+any that aren't available locally with a note rather than failing. For
+paired data, ``PAIR_SOURCES`` adds "wmt_da_paired" (real human paired
+translation-quality judgments) alongside "openeval"/"inspect"/"real".
 
 Sample sizes >= a corpus's size cannot be drawn without replacement and are
 silently skipped by the caller (see ``cases/ci_single.py``).
@@ -263,6 +267,7 @@ def _oe_parse(val: Any) -> Any:
 
 
 def _oe_get_model_name(model_val: Any) -> str | None:
+    """Extract the model name from OpenEval's (possibly JSON-string) model field."""
     obj = _oe_parse(model_val)
     if isinstance(obj, dict):
         return obj.get("name")
@@ -334,6 +339,7 @@ def _oe_extract_score(scores_val: Any, metric_name: str | None) -> float | None:
 
 
 def _oe_first_metric_name(scores_val: Any) -> str | None:
+    """Return the first metric name present in OpenEval's scores field, if any."""
     data = _oe_parse(scores_val)
     if isinstance(data, list) and data:
         e0 = data[0]
@@ -694,7 +700,7 @@ def build_real_data_sources(
     "real" combines openeval + inspect + privacy_judge for maximum
     real-data diversity, skipping any that aren't available locally with a
     note rather than failing -- but deliberately excludes "appstore" for
-    now (2026-07-27): it's currently the only real Likert source (a single
+    now: it's currently the only real Likert source (a single
     dataset/population, no paired Likert source at all), too thin to treat
     as a general real-data Likert validation the way the 5 continuous
     OpenEval benchmarks + privacy_judge support continuous. Still directly
@@ -751,16 +757,10 @@ def build_real_data_sources(
 # ─────────────────────────────────────────────────────────────────────────────
 # Paired (shared-item) real data
 #
-# Supports any OPENEVAL_BENCHMARK_SPECS eval_type (binary or continuous) as
-# of 2026-07-27 -- previously restricted to known-binary benchmarks only
-# (an artifact of matching sim_tango_real.py's binary-only Newcombe/Tango/
-# Bayes-paired scope, not an architectural limit: build_openeval_corpus_pairs
-# just never emitted non-binary pairs, even though ci_paired.py's generic
-# non-binary CI methods -- t_interval/logit_t/nig/el -- already handle them
-# fine). Still restricted to R=1 (single run per item) -- multi-run real
-# pairs (Tango multirun variants, nested-diff bootstrap, lmm_diff) are a
-# documented exception, deferred to a future ci_nested real-data extension.
-# See harness README known exceptions.
+# Supports any OPENEVAL_BENCHMARK_SPECS eval_type (binary or continuous).
+# build_real_pair_sources below is the flat (R=1) variant; multi-run real
+# pairs are built by build_real_pair_sources_nested (used by ci_paired.py's
+# --nested-mode with --data-source inspect).
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Default (model, benchmark) pairs confirmed to have data in OpenEval.
@@ -792,10 +792,9 @@ OPENEVAL_PAIR_DEFAULT_MODEL_BENCH: list[tuple[str, str]] = [
     ("qwen-2.5-14b-instruct", "omni-math"),
     ("qwen-2.5-72b-instruct", "omni-math"),
     ("llama-2-13b-hf", "omni-math"),
-    # Continuous benchmarks (added 2026-07-27 once build_openeval_corpus_pairs
-    # stopped restricting to binary -- see the section comment above). Each
-    # pair confirmed live to share >=500 aligned items with no non-binary
-    # skips/rounding (they're already continuous, so nothing gets rounded).
+    # Continuous benchmarks. Each pair confirmed live to share >=500 aligned
+    # items with no non-binary skips/rounding (they're already continuous,
+    # so nothing gets rounded).
     ("bloom", "cnndm"),
     ("opt-66b", "cnndm"),
     ("DeepSeek-V3-0324", "do-not-answer"),

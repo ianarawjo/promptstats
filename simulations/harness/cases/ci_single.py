@@ -137,6 +137,8 @@ RESULTS_MODES = ["save", "off"]
 
 @dataclass
 class SimResult:
+    """One (source, n, method) cell's aggregated coverage/width/score/timing totals over n_reps."""
+
     source: str  # "synthetic" | "openeval" | "inspect" | "real"
     label: str  # scenario label (synthetic) or "model/benchmark_id" (real)
     eval_type: str
@@ -196,7 +198,17 @@ def _run_cell(
     source_obj: CISource, n: int, n_reps: int, n_bootstrap: int, alpha: float, seed,
     methods_filter: frozenset[str] | None = None,
 ) -> list[SimResult]:
-    """Run all reps for one (source, n) cell."""
+    """Run all reps for one (source, n) cell.
+
+    ``methods_filter``, if given, restricts computation (not just reporting)
+    to methods whose ``.name`` is in the set. This matters for cost: the
+    resampling-based methods (the bootstrap family, el, nig, bayes_indep)
+    each redraw or re-optimize per rep, while the closed-form methods
+    (wilson, wald, jeffreys, clopper_pearson, t_interval, beta, logit_t) are
+    analytic and comparatively cheap -- so a --methods subset that drops the
+    resampling methods can cut a run's time substantially. ``None`` (default)
+    computes every method applicable to ``source_obj.eval_type``.
+    """
     rng = np.random.default_rng(seed)
     is_binary = source_obj.eval_type == "binary"
 
@@ -425,6 +437,14 @@ def run_simulation(
     n_workers: int = 1,
     methods_filter: frozenset[str] | None = None,
 ) -> list[SimResult]:
+    """Run the flat (non-nested) single-sample simulation over every
+    (source, n) cell, sequentially or across ``n_workers`` fork-pool
+    processes, reporting progress via ``progress_mode``.
+
+    Cells where ``n`` meets or exceeds a source's corpus size (``max_n``) are
+    skipped with a warning rather than run. Returns the concatenated list of
+    per-cell ``SimResult`` rows.
+    """
     global _CELL_SOURCES
     _CELL_SOURCES = list(sources)
     ss = np.random.SeedSequence(seed)
@@ -717,6 +737,15 @@ def run_nested_simulation(
     methods_filter: frozenset[str] | None = None,
     skip_bootstrap_binary: bool = False,
 ) -> list[SimResult]:
+    """Run the --nested-mode simulation over every (source, n) cell at a
+    fixed ``runs`` (R), sequentially or across ``n_workers`` fork-pool
+    processes, reporting progress via ``progress_mode``.
+
+    Mirrors ``run_simulation`` but dispatches to ``_run_nested_cell``, which
+    additionally computes the nested (full N-by-R matrix) CI methods
+    alongside the flat cell-mean ones. Returns the concatenated list of
+    per-cell ``SimResult`` rows.
+    """
     global _NESTED_CELL_SOURCES
     _NESTED_CELL_SOURCES = list(sources)
     ss = np.random.SeedSequence(seed)
@@ -873,6 +902,11 @@ def _print_overall_summary_table(
 
 
 def print_report(results: list[SimResult], sample_sizes: list[int], alpha: float, n_reps: int) -> None:
+    """Print the plain-text console report: a per-eval-type coverage-vs-n
+    table, then three OVERALL SUMMARY tables (binary, continuous, and
+    likert+grades pooled) with Cov/MinCov/Width/Penalty/Score/Time. Writes
+    to stdout only; returns nothing.
+    """
     target = 1.0 - alpha
     eval_types_present = [et for et in EVAL_TYPES if any(r.eval_type == et for r in results)]
     present_methods = {r.method for r in results}
@@ -927,6 +961,12 @@ def print_report(results: list[SimResult], sample_sizes: list[int], alpha: float
         "OVERALL SUMMARY -- CONTINUOUS [0,1] (averaged across sources)",
         ["continuous"], results, agg, agg_counts, target, sizes_present,
     )
+    # NOTE: this pools likert (1-5) and grades (0-100) into one table, unlike
+    # latex_overall_summary below, which keeps them as separate row groups via
+    # report_eval_type_group -- that function's docstring says pooling them
+    # hides materially different small-N behavior and mixes incompatible
+    # scales. This differs from latex_overall_summary's split; unclear if
+    # intentional (console legibility) or an oversight.
     _print_overall_summary_table(
         "OVERALL SUMMARY -- NUMERIC: LIKERT + GRADES (averaged across sources)",
         ["likert", "grades"], results, agg, agg_counts, target, sizes_present,
@@ -1063,6 +1103,12 @@ def latex_overall_summary(results: list[SimResult], alpha: float, n_reps: int) -
 
 
 def save_results_artifacts(*, results: list[SimResult], alpha: float, sample_sizes: list[int], n_reps: int, out_dir: str, run_stem: str, latex: bool = False) -> list[str]:
+    """Write per-(source, n, method) results to ``{run_stem}_results.csv``
+    (one row per cell, with derived coverage/width/score/time stats) and the
+    captured ``print_report`` console output to ``{run_stem}_summary.log``,
+    appending a LaTeX booktabs table from ``latex_overall_summary`` when
+    ``latex`` is set. Returns the two saved file paths.
+    """
     out_base = Path(out_dir)
     out_base.mkdir(parents=True, exist_ok=True)
 
@@ -1568,6 +1614,11 @@ def save_coverage_vs_run_noise_plot(*, results: list[SimResult], alpha: float, n
 
 
 def add_arguments(parser: argparse.ArgumentParser) -> None:
+    """Register this case's CLI arguments on the shared harness parser:
+    data source/scenario selection, eval types and methods to run, sweep
+    sizes/reps/bootstrap draws, output (results/plots) options, and the
+    --nested-mode-specific flags (runs, run-noise/ICC sweeps, etc.).
+    """
     parser.add_argument("--data-source", choices=DATA_SOURCES, default="synthetic",
                          help="'synthetic' (default), or a real-data source: " + ", ".join(REAL_DATA_SOURCES))
     parser.add_argument("--scenario-suite", choices=SCENARIO_SUITES, default="expanded",
@@ -1794,6 +1845,12 @@ def nested_official_args(base_seed: int = 44) -> argparse.Namespace:
 
 
 def run(args: argparse.Namespace) -> CaseResult:
+    """Harness entry point for this case. Builds sources (synthetic or
+    real-data, flat or --nested-mode) from ``args``, runs the simulation,
+    prints the console report, and optionally saves CSV/log artifacts and
+    plots. Returns a ``CaseResult`` with status, output paths, and key
+    metrics ("ok"), or an error ``CaseResult`` on any exception.
+    """
     t0 = time.time()
     try:
         plots_dir = args.plots_dir or str(Path(args.out_dir) / "plots")

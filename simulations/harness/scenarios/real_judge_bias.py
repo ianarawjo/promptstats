@@ -222,8 +222,8 @@ def load_real_judge_bias_corpus(
         if dataset == "privacy_judge":
             # A small number of raw judge_score rows fall outside the
             # dataset's declared native scale (1.0, 5.0) -- e.g. a judge
-            # occasionally producing 6.0, an out-of-rubric rating (confirmed
-            # 2026-08-05: exactly 1 of 3147 rows, no rows below 1.0). Left
+            # occasionally producing 6.0, an out-of-rubric rating (observed:
+            # rare, ~1 in 3000 rows, no rows below 1.0). Left
             # unclamped, _rescale below (no clipping of its own) would map
             # 6.0 to 1.25 -- outside the [0, 1] range every downstream PPI
             # correction assumes every rescaled score lives in. Clamp here,
@@ -353,35 +353,30 @@ def generate_real_twogroup_null_cell(
     but group A is read through `judge_a` and group B through `judge_b`,
     two DIFFERENT judge models, not the same one reading both.
 
-    This is a deliberate redesign (2026-07-23) from the original single-
-    judge version, which scored both A and B with the SAME judge_model.
-    That construction made the "uncorrected" comparison (a classical test
-    run directly on judge scores, no human labels) structurally unable to
-    fail: since A and B are random draws from the identical population read
-    by the identical instrument, ANY judge bias -- however large -- is
-    identical in expectation on both sides and cancels out of an A-vs-B
-    difference completely. Confirmed directly on real data: a badly-biased,
-    weakly-human-correlated judge (e.g. arena's judges correlate with human
-    labels at only r=0.19-0.29) still passed the same-judge uncorrected
-    check at essentially nominal Type-I error, which made the check
-    uninformative about whether skipping PPI correction is actually risky --
-    it could only ever demonstrate "there was nothing to correct here,"
-    never illustrate a real failure mode the way the synthetic PPI sweep's
-    twogroup checks do (see pvalues.py's confound/noise_family scenarios).
+    Scoring A and B through the SAME judge_model would make the
+    "uncorrected" comparison (a classical test run directly on judge
+    scores, no human labels) structurally unable to fail: since A and B are
+    random draws from the identical population read by the identical
+    instrument, ANY judge bias -- however large -- is identical in
+    expectation on both sides and cancels out of an A-vs-B difference
+    completely, regardless of how biased or weakly human-correlated that
+    judge is. That would make the check uninformative about whether
+    skipping PPI correction is actually risky -- it could only ever
+    demonstrate "there was nothing to correct here," never illustrate a
+    real failure mode the way the synthetic PPI sweep's twogroup checks do
+    (see pvalues.py's confound/noise_family scenarios).
 
     Using two DIFFERENT real judges instead reintroduces a genuine
     asymmetry an uncorrected test IS vulnerable to: judge_a and judge_b
-    generally have different bias/noise characteristics (confirmed
-    directly on real data: arena's 4 judges range from +0.005 to +0.066
-    mean bias on a [0,1]-rescaled scale, wmt_da's from -0.060 to +0.056),
-    so a naive "just trust the judge" comparison between a judge_a-scored
-    group and a judge_b-scored group can genuinely diverge even though the
-    TRUE (human-label) difference is exactly zero -- the real-data
-    analogue of a synthetic confound scenario, without fabricating one.
-    Deliberately NOT a content-based split (e.g. by language pair or app
-    id) -- see cases/ppi_real.py's module docstring for why that's
-    explicitly out of scope (conflates a real content difference with
-    judge bias, a dirtier signal).
+    generally have different bias/noise characteristics, so a naive "just
+    trust the judge" comparison between a judge_a-scored group and a
+    judge_b-scored group can genuinely diverge even though the TRUE
+    (human-label) difference is exactly zero -- the real-data analogue of a
+    synthetic confound scenario, without fabricating one. Deliberately NOT
+    a content-based split (e.g. by language pair or app id) -- see
+    cases/ppi_real.py's module docstring for why that's explicitly out of
+    scope (conflates a real content difference with judge bias, a dirtier
+    signal).
 
     Only independent-samples tests apply to this structure (ttest,
     ttest_welch, mwu) -- for a genuine PAIRED
@@ -408,19 +403,16 @@ def _independent_rater_copies(
     score range every dataset here uses) if ``rater_noise_sd > 0``, else
     exact unperturbed copies.
 
-    Exact copies (``rater_noise_sd == 0``) are what every proxy-paired/
-    repeated null construction in this module used exclusively before
-    2026-08-15: a single human rating stands in for "the ground truth" on
-    every arm, since these datasets only ever collected ONE rating per
-    item. That's a defensible way to build a KNOWN-exactly-zero true
-    difference for a Type-I check, but it's also an unrealistically
-    idealized one -- two genuinely independent human ratings of the same
-    item essentially never agree to floating-point precision, and testing
-    calibration ONLY at that exact-tie boundary was found (2026-08-15) to
-    trigger a real degenerate-variance bug in wilcoxon's cross-fit power-
-    tuning (see results_why_ppi_shrink_1_over_0.md's real-data wilcoxon
-    addendum) that a more realistic small-noise construction would have
-    masked less severely. Independent (not shared) per-copy noise is
+    Exact copies (``rater_noise_sd == 0``) use a single human rating as
+    "the ground truth" on every arm, since these datasets only ever
+    collected ONE rating per item. That's a defensible way to build a
+    KNOWN-exactly-zero true difference for a Type-I check, but it's also an
+    unrealistically idealized one -- two genuinely independent human
+    ratings of the same item essentially never agree to floating-point
+    precision, and testing calibration ONLY at that exact-tie boundary can
+    trigger degenerate-variance behavior in rank-based cross-fit power-
+    tuning (e.g. wilcoxon's) that a more realistic small-noise construction
+    masks less severely. Independent (not shared) per-copy noise is
     essential: jittering `lab` once and copying the jittered result would
     still leave every arm identically tied to each other, just at a
     different constant -- the whole point is breaking that tie while
@@ -465,7 +457,7 @@ def generate_real_paired_null_cell(
     this an exact Type-I null in expectation.
 
     Feeds cases/ppi_real.py's paired-null check (wilcoxon/paired_t/
-    bayes_bootstrap/bootstrap_t/tango -- the PPI test methods that need a
+    bayes_bootstrap/bootstrap_t/mj_floor -- the PPI test methods that need a
     genuine paired/repeated structure, which a single judge model alone
     can't provide)."""
     n = min(n, corpus.corpus_size)
@@ -527,7 +519,7 @@ def generate_real_omnibus_repeated_null_cell(
 
     Feeds cases/ppi_real.py's omnibus-repeated check (anova_rep/friedman --
     the 3-condition analogue of the paired check's wilcoxon/paired_t/
-    bayes_bootstrap/bootstrap_t/tango, which only handle k=2 conditions).
+    bayes_bootstrap/bootstrap_t/mj_floor, which only handle k=2 conditions).
     Returns (groups, groups_lab) as 3-element lists, the shape
     evalstats.tests' _ppi_anova_repeated_p_value/_ppi_friedman_p_value
     expect."""

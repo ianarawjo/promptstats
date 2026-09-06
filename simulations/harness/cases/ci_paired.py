@@ -22,7 +22,7 @@ Two variants were tried and abandoned after simulation, kept here as notes
 so the same dead ends aren't re-explored:
 - tango_hybrid: plain mj_floor, switching to tango_scc only when the
   observed discordant pairs looked imbalanced. Its worst-case coverage
-  barely improved on plain tango's, because the residual failures were
+  barely improved on plain mj_floor's, because the residual failures were
   samples that *looked* balanced by chance despite a lopsided true
   generating process -- unrescuable by any method conditioning on the
   observed discordant split (confirmed bayes_paired_comp fails the same way
@@ -36,17 +36,19 @@ so the same dead ends aren't re-explored:
   boundary (0 or 1), i.e. when discordance is sparse or lopsided.
 
 Known exceptions (see simulations/harness/README.md):
-- Real-data pairs (openeval/inspect/real) only support R=1 (flat, single
-  run per item) and are restricted to known-binary benchmarks. Multi-run
-  real pairs (Tango multirun variants, nested-diff bootstrap, lmm_diff) are
-  deferred to a future real-data extension.
+- Flat (non-nested) mode's real-data pairs (openeval/inspect/wmt_da_paired/
+  real) only support R=1 (single run per item); multi-run real pairs need
+  --nested-mode instead (see below).
 
 --nested-mode (ported from simulations/sim_compare_boot_nested.py, pairwise
-phase) sweeps multi-run paired scenarios parameterised by run_noise_frac
-(synthetic only), reporting flat (cell-mean reduction) and "*_nested"/
-"*_flat"/"*_multirun_*" CI methods side by side. There is no separate
-ci_nested case -- see cases/ci_single.py's --nested-mode for the
-single-sample analogue.
+phase) sweeps multi-run paired scenarios, reporting flat (cell-mean
+reduction) and "*_nested"/"*_flat"/"*_multirun_*" CI methods side by side.
+Supports synthetic data (parameterised by run_noise_frac) and real
+multi-run data from Inspect AI logs (--data-source inspect, via
+build_real_pair_sources_nested; see nested_real_official_args()). Always
+uses statistic="mean" (no median support). There is no separate ci_nested
+case -- see cases/ci_single.py's --nested-mode for the single-sample
+analogue.
 """
 
 from __future__ import annotations
@@ -166,6 +168,9 @@ RESULTS_MODES = ["save", "off"]
 
 @dataclass
 class SimResult:
+    """Aggregated outcome for one (source, eval_type, n, method) cell, summed
+    over n_reps repetitions."""
+
     source: str  # "synthetic" | "openeval" | "inspect" | "real"
     label: str
     eval_type: str
@@ -419,67 +424,42 @@ def _detect_dither_halfwidth(pooled: np.ndarray) -> float:
 
 def _debiased_dither(x: np.ndarray, half: float, lo: float, hi: float, rng: np.random.Generator) -> np.ndarray:
     """Add U(-half, half) jitter to x, clip to [lo, hi], then subtract the
-    EXACT closed-form bias that clipping introduces near the boundaries.
+    closed-form bias that clipping introduces near the boundaries.
 
-    Naive clip(x + jitter, lo, hi) is NOT mean-preserving for x within
+    Naive clip(x + jitter, lo, hi) is not mean-preserving for x within
     `half` of a boundary: jitter that would push x below lo (or above hi)
     piles up exactly at the boundary instead of continuing past it, pulling
-    E[clipped] toward the interior. For x exactly at a hard boundary with
-    jitter ~ U(-h, h), E[clip] = x +/- h/4 (derived below) -- NOT x. This
-    doesn't average away with N (it's a fixed per-item shift, not noise),
-    and because two paired arms generally have DIFFERENT boundary-mass
-    compositions (that's what makes them differ), the bias doesn't cancel
-    in the arms' difference either -- it contaminates the estimated diff
-    directly. Confirmed as a real regression: on likert "bimodal-extreme"
-    data (icc=0.95, d=0.4, heavy mass at both the floor AND ceiling, more
-    at the ceiling), logit_t_dither's coverage fell from 0.953 (n=15) to
-    0.870 (n=100) -- degrading WITH N, the signature of a persistent bias
-    rather than added variance -- while plain logit_t stayed flat (~0.94-
-    0.97) on the identical scenario. Root cause confirmed directly: the
-    dithered point estimate was shifted by -0.044 relative to the
-    undithered one, consistent with the ceiling (39.5% of mass) pulling the
-    difference down more than the floor (20.3% of mass) pulled it up.
+    E[clipped] toward the interior. This doesn't average away with N (it's
+    a fixed per-item shift, not noise), and because two paired arms
+    generally have different boundary-mass compositions, the bias doesn't
+    cancel in the arms' difference either -- it contaminates the estimated
+    diff directly.
 
     Derivation: for x with distance d = x - lo from the lower bound
     (d < half means boundary-adjacent) and jitter j ~ U(-half, half),
     E[max(x+j, lo)] - x = E[max(j, -d)] = (half - d)^2 / (4*half) for
     d < half (0 otherwise) -- a standard truncated-uniform expectation.
     The upper-bound case is the mirror image. Subtracting these exactly
-    recenters the expectation back on x regardless of boundary proximity
-    (verified numerically: reduces a 0.125 bias at h=0.5 to ~0.0005,
-    Monte-Carlo-noise level, if left un-clipped). Reflection or rejection-
-    resampling were tried first and are WORSE, not better, here: for
+    recenters the expectation back on x regardless of boundary proximity.
+    Reflection or rejection-resampling are worse alternatives here: for
     jitter straddling a hard boundary symmetrically, both fold the entire
     out-of-bounds half onto an exact duplicate of the in-bounds half
-    (rather than restoring symmetry around x), giving twice clip's bias
-    (0.25 vs 0.125 at h=0.5).
+    (rather than restoring symmetry around x), roughly doubling the bias
+    plain clipping would leave.
 
-    The correction is finally re-clipped to [lo, hi] -- NOT left
-    unclipped as an earlier version of this function did. That version's
-    docstring claimed the resulting per-item excursions past [lo, hi]
-    (up to half/4) were harmless because they "only ever feed a per-item
-    mean" -- that was wrong: pair_diffs_dither/cell_diffs_dither are
-    per-ITEM arrays (n entries), passed directly into logit_t_ci_1d,
-    which raises ValueError on inputs meaningfully outside [0, 1] after
-    rescaling (see that function's docstring re: a near-identical past
-    incident). With n independent items, the chance that AT LEAST ONE
-    exceeds the tolerance grows with n (~1-(1-p)^n), not shrinks -- a
-    max-of-n effect, invisible in small samples, that produced the exact
-    same "coverage falls with N" symptom this whole fix targets, just
-    from a different mechanism (an exception being silently swallowed
-    into a zero-width interval by the `except Exception:` fallback below,
-    not lost variance). Confirmed via direct measurement on likert
-    "uniform" data (heavy floor+ceiling mass, so most prone to
-    floor-vs-ceiling item pairs before any jitter): the unclipped version's
-    ValueError rate rose from 2.3% (n=10) to 22.3% (n=100). Re-clipping
-    trades away some of the bias correction for boundary-adjacent items
-    (residual ~0.070 vs clip-alone's 0.125 at h=0.5 -- a ~44% reduction,
-    not a full fix) in exchange for guaranteed validity; a value exactly
-    at a hard boundary can't be made simultaneously unbiased AND
-    contained in [lo, hi] by any deterministic remapping of a jitter
-    that spans past that boundary -- containment was chosen as the
-    non-negotiable constraint since violating it doesn't degrade
-    gracefully, it corrupts the whole interval for that rep."""
+    The correction is re-clipped to [lo, hi] rather than left unclipped:
+    pair_diffs_dither/cell_diffs_dither are per-item arrays passed directly
+    into logit_t_ci_1d, which raises ValueError on inputs meaningfully
+    outside [0, 1] after rescaling, and with n independent items the
+    chance that at least one exceeds tolerance grows with n. Re-clipping
+    trades away some of the bias correction for boundary-adjacent items in
+    exchange for guaranteed validity -- a value exactly at a hard boundary
+    can't be made simultaneously unbiased and contained in [lo, hi] by any
+    deterministic remapping of a jitter that spans past that boundary;
+    containment is the non-negotiable constraint here since violating it
+    corrupts the whole interval for that rep, rather than degrading
+    gracefully.
+    """
     if half <= 0:
         return x
     jitter = rng.uniform(-half, half, size=x.shape)
@@ -502,9 +482,8 @@ def _run_cell(
     "tango_scc", "bayes_paired_comp"}`` skips the bootstrap family, newcombe,
     and bayes_indep_comp entirely, which matters because bayes_indep_comp/
     bayes_paired_comp (importance sampling) are ~40-70x slower per call than
-    tango/tango_scc (closed-form/quartic) -- see interval-score comparisons
-    in this file's module docstring history. ``None`` (default) computes
-    every applicable method, matching prior behavior.
+    mj_floor/tango_scc's closed-form/quartic evaluation. ``None`` (default)
+    computes every applicable method, matching prior behavior.
     """
     rng = np.random.default_rng(seed)
 
@@ -852,6 +831,13 @@ def run_simulation(
     progress_mode: str = "bar", seed: int = 42, n_workers: int = 1,
     method_names: frozenset[str] | None = None,
 ) -> list[SimResult]:
+    """Run the flat (non-nested) pairwise CI simulation over every
+    (source, sample size) cell, sequentially or across `n_workers` fork
+    processes, and return the concatenated per-method SimResults.
+
+    Cells where `n` meets or exceeds a source's corpus size (`max_n`) are
+    skipped, with a warning printed for each.
+    """
     global _CELL_SOURCES
     _CELL_SOURCES = list(sources)
     ss = np.random.SeedSequence(seed)
@@ -911,7 +897,7 @@ def _run_nested_pairwise_cell(
     # skip_bootstrap_binary: mirrors ci_single.py's _run_nested_cell -- the
     # bootstrap family (flat cell-diff resampling and full-matrix nested
     # resampling alike) underperforms the dedicated binary pairwise methods
-    # (tango_*/newcombe_flat/bayes_pair_*) on binary data, so skip it there
+    # (mj_floor_*/newcombe_flat/bayes_pair_*) on binary data, so skip it there
     # to save compute and avoid diluting the bootstrap family's own
     # Score/Width average with its own binary underperformance in the
     # overall-summary and LaTeX output.
@@ -1194,6 +1180,11 @@ def run_nested_pairwise_simulation(
     skip_bootstrap_binary: bool = False,
     method_names: frozenset[str] | None = None,
 ) -> list[SimResult]:
+    """Run the --nested-mode flat-vs-nested pairwise CI simulation over
+    every (source, sample size) cell at a fixed `runs` per input,
+    sequentially or across `n_workers` fork processes, and return the
+    concatenated per-method SimResults.
+    """
     global _NESTED_CELL_SOURCES
     _NESTED_CELL_SOURCES = list(sources)
     ss = np.random.SeedSequence(seed)
@@ -1389,6 +1380,11 @@ def _print_overall_summary_table(
 
 
 def print_report(results: list[SimResult], sample_sizes: list[int], alpha: float, n_reps: int, statistic: str) -> None:
+    """Print the full text report: per-(eval_type, method, n) coverage
+    grid, one OVERALL SUMMARY table per eval-type group (coverage/width/
+    score/decision-rate), and, if any null-scenario rows are present, a
+    Type-I error table.
+    """
     target = 1.0 - alpha
     type1_map, power_map = _decision_rates(results)
     non_null = [r for r in results if not r.is_null]
@@ -1629,6 +1625,11 @@ def save_results_artifacts(
     *, results: list[SimResult], alpha: float, sample_sizes: list[int], n_reps: int,
     statistic: str, out_dir: str, run_stem: str, latex: bool = False,
 ) -> list[str]:
+    """Write one row per (source, eval_type, n, method) cell to
+    `<run_stem>_results.csv`, and print_report()'s text (plus a LaTeX
+    booktabs table appended if `latex=True`) to `<run_stem>_summary.log`,
+    both under `out_dir`. Returns the two written paths.
+    """
     out_base = Path(out_dir)
     out_base.mkdir(parents=True, exist_ok=True)
 
@@ -1901,7 +1902,7 @@ def save_by_n_violin_plot(
     demand, since (a) it isn't a general-purpose calibration check like the
     other plots in this file, and (b) it's cheapest with --methods scoped
     down to just the 2-3 methods being compared (bayes_paired_comp's
-    importance sampling is ~40-70x slower per call than tango/tango_scc's
+    importance sampling is ~40-70x slower per call than mj_floor/tango_scc's
     closed-form/quartic paths -- see ``--methods``' help).
 
     Returns
@@ -2156,6 +2157,10 @@ def save_coverage_vs_run_noise_plot(*, results: list[SimResult], alpha: float, n
 
 
 def add_arguments(parser: argparse.ArgumentParser) -> None:
+    """Register ci_paired's CLI arguments onto `parser`: data-source/
+    scenario selection, eval-type/method filters, sweep sizes and effect
+    sizes, --nested-mode and its sub-options, and output/plotting controls.
+    """
     parser.add_argument("--data-source", choices=DATA_SOURCES, default="synthetic",
                          help="'synthetic' (default), or a real-data source: " + ", ".join(REAL_PAIR_SOURCES))
     parser.add_argument("--scenario-suite", choices=SCENARIO_SUITES, default="expanded",
@@ -2169,7 +2174,7 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
                               "tango_scc bayes_paired_comp). Skips *computing* (not just reporting) any "
                               "method not listed -- the way to cut runtime when bayes_indep_comp/"
                               "bayes_paired_comp (importance sampling, ~40-70x slower per call than "
-                              "tango/tango_scc's closed-form) aren't needed. Ignored in --nested-mode, "
+                              "mj_floor/tango_scc's closed-form) aren't needed. Ignored in --nested-mode, "
                               "which doesn't yet support per-method filtering. Default: compute every "
                               "method applicable to each source's eval type.")
     parser.add_argument("--benchmarks", nargs="+", default=None, metavar="ID", help="Real-data: benchmark IDs to filter to")
@@ -2180,7 +2185,12 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--inspect-csv", default=None,
                          help=f"Path to CSV from collect_inspect_benchmarks.py "
                               f"(used by --data-source inspect/real; defaults to {DEFAULT_INSPECT_CSV!r})")
-    parser.add_argument("--runs", type=int, default=1, metavar="R", help="Runs per input. R>=3 activates nested bootstrap logic (synthetic only; default: 1)")
+    parser.add_argument("--runs", type=int, default=1, metavar="R",
+                         help="Flat mode: runs per input. R>=3 activates the nested-bootstrap-diffs "
+                              "path in _pairwise_ci (real-data sources force runs=1, so this only "
+                              "engages for synthetic data; default: 1). In --nested-mode this is the "
+                              "fallback when --runs-sweep isn't given; nested mode itself supports "
+                              "both synthetic and real (inspect) data.")
     parser.add_argument("--statistic", choices=["mean", "median"], default="mean")
     parser.add_argument("--reps", type=int, default=200, metavar="N")
     parser.add_argument("--bootstrap-n", type=int, default=500, metavar="N")
@@ -2212,7 +2222,8 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
                               "methods you aren't plotting. Ignored in --nested-mode.")
     parser.add_argument("--nested-mode", action="store_true", default=False,
                          help="Multi-run flat-vs-nested pairwise CI comparison (ported from "
-                              "sim_compare_boot_nested.py), synthetic only, statistic=mean only.")
+                              "sim_compare_boot_nested.py). Supports --data-source synthetic or "
+                              "inspect (real multi-run data); statistic=mean only.")
     parser.add_argument("--runs-sweep", type=int, nargs="+", default=None, metavar="R",
                          help="Nested mode: sweep multiple R values, overrides --runs")
     parser.add_argument("--run-noise-fracs", type=float, nargs="+", default=RUN_NOISE_FRACS_DEFAULT, metavar="F",
@@ -2362,7 +2373,7 @@ def nested_official_args(base_seed: int = 44) -> argparse.Namespace:
 
     no_bootstrap_binary=True: mirrors ci_single.py's nested_official_args --
     the bootstrap-family methods underperform the dedicated binary pairwise
-    methods (tango_*/newcombe_flat/bayes_pair_*) on binary data, so skip
+    methods (mj_floor_*/newcombe_flat/bayes_pair_*) on binary data, so skip
     computing them there entirely rather than waste compute and dilute the
     bootstrap family's own Score/Width average with binary underperformance.
 
@@ -2421,7 +2432,7 @@ def discordant_comparison_args(base_seed: int = 46) -> argparse.Namespace:
     --methods scopes computation to just the three methods being compared
     (skipping the bootstrap family, newcombe, and bayes_indep_comp entirely
     -- see --methods' help), which matters because bayes_paired_comp's
-    importance sampling is ~40-70x slower per call than tango/tango_scc's
+    importance sampling is ~40-70x slower per call than mj_floor/tango_scc's
     closed-form/quartic paths.
     """
     return argparse.Namespace(
@@ -2440,6 +2451,12 @@ def discordant_comparison_args(base_seed: int = 46) -> argparse.Namespace:
 
 
 def run(args: argparse.Namespace) -> CaseResult:
+    """Harness entry point: build CIPairSources for `args.data_source`
+    (synthetic, or real via build_real_pair_sources/build_real_pair_sources_nested),
+    run the flat or --nested-mode simulation, print the report, and save
+    CSV/log/plot artifacts as requested. Returns a CaseResult with status,
+    output paths, and headline coverage metrics.
+    """
     t0 = time.time()
     try:
         plots_dir = args.plots_dir or str(Path(args.out_dir) / "plots")
