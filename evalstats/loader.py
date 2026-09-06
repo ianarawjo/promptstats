@@ -29,7 +29,7 @@ _CANONICAL_ALIASES: dict[str, list[str]] = {
     "run":    ["run", "seed", "repeat", "run_id", "trial"],
 }
 
-_SCORE_ALIASES = {"score", "value", "result", "metric"}
+_SCORE_ALIASES = ["score", "value", "result", "metric"]
 
 
 # ─────────────────────────────────────────────────────────────────────────────

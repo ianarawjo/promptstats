@@ -13,11 +13,13 @@ import numpy as np
 from matplotlib.lines import Line2D
 
 if TYPE_CHECKING:
+    from matplotlib.axes import Axes
     from matplotlib.figure import Figure
 
 from evalstats.core.types import BenchmarkResult
 from evalstats.core.variance import RobustnessResult, robustness_metrics
 
+from ._palette import GRID, TEXT, TEXT_SECONDARY
 
 # -- Color palette --
 _PALETTE = {
@@ -29,10 +31,10 @@ _PALETTE = {
     "point_neg": "#A34A63",         # muted rose — negative mean
     "point_zero": "#5C6470",        # cool gray — CI overlaps zero
     "zero_line": "#D4D8DE",         # soft gray — zero reference
-    "grid": "#EEF1F4",              # very light gray — x grid
+    "grid": GRID,
     "row_alt": "#FAFBFC",           # alternating row background
-    "text": "#2D333B",              # dark slate — labels
-    "text_secondary": "#6B7280",    # muted gray — secondary text
+    "text": TEXT,
+    "text_secondary": TEXT_SECONDARY,
 }
 
 
@@ -44,6 +46,7 @@ def plot_point_estimates(
     figsize: Optional[tuple[float, float]] = None,
     title: Optional[str] = None,
     rng: Optional[np.random.Generator] = None,
+    ax: Optional["Axes"] = None,
 ) -> Figure:
     """Plot absolute performance means with marginal confidence intervals.
 
@@ -58,13 +61,16 @@ def plot_point_estimates(
         Confidence level used when computing robustness from raw data.
     sort_by : str
         Sort order: 'mean' (descending), 'label' (alphabetical),
-        or 'ci_width' (ascending).
+        'ci_width' (ascending), or 'input_order' (as given in *result*).
     figsize : tuple[float, float], optional
         Figure size. Defaults to (10, 0.5 * N_templates + 1.5).
     title : str, optional
         Plot title. Defaults to a descriptive title.
     rng : np.random.Generator, optional
         Random number generator for reproducibility.
+    ax : matplotlib.axes.Axes, optional
+        Draw into this existing axes instead of creating a new figure --
+        for composing this plot into a multi-panel figure alongside others.
 
     Returns
     -------
@@ -94,8 +100,13 @@ def plot_point_estimates(
             order = np.argsort(-rob.mean)
         else:
             order = np.argsort(rob.ci_high - rob.ci_low)
+    elif sort_by == "input_order":
+        order = np.arange(n)
     else:
-        raise ValueError(f"Unknown sort_by: {sort_by}")
+        raise ValueError(
+            f"Unknown sort_by: {sort_by!r}. "
+            "Expected 'mean', 'label', 'ci_width', or 'input_order'."
+        )
 
     labels = [rob.labels[i] for i in order]
     means = rob.mean[order]
@@ -107,11 +118,14 @@ def plot_point_estimates(
         ci_hi = rob.ci_high[order]
 
     # Figure setup
-    if figsize is None:
-        figsize = (10, max(3, 0.5 * n + 1.5))
-
-    fig, ax = plt.subplots(figsize=figsize)
-    fig.patch.set_facecolor("white")
+    own_fig = ax is None
+    if own_fig:
+        if figsize is None:
+            figsize = (10, max(3, 0.5 * n + 1.5))
+        fig, ax = plt.subplots(figsize=figsize)
+        fig.patch.set_facecolor("white")
+    else:
+        fig = ax.get_figure()
     ax.set_facecolor("white")
 
     y_positions = np.arange(n)
@@ -255,5 +269,6 @@ def plot_point_estimates(
         style="italic",
     )
 
-    fig.tight_layout()
+    if own_fig:
+        fig.tight_layout()
     return fig

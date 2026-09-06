@@ -822,58 +822,36 @@ def _compute_alignment_metrics(
             "example": example,
         }
 
-        def pe(a, b):
-            r, _ = pearsonr(a, b)
-            return float(r)
-
-        def sp(a, b):
-            r, _ = spearmanr(a, b)
-            return float(r)
-
-        est, lo, hi = _ci2(pe, llm, human, alpha=alpha, rng=rng)
-        band, interp, example = _interpret_corr(est, lo, hi, len(llm), "Pearson r")
-        metrics["pearson_r"] = {
-            "estimate": est, "ci_low": lo, "ci_high": hi,
-            "label": "Pearson r",
-            "band": band,
-            "what": (
+        metrics.update(_pearson_spearman_metrics(
+            llm, human, alpha=alpha, rng=rng, ci2_fn=_ci2,
+            pearson_label="Pearson r", spearman_label="Spearman r",
+            pearson_what=(
                 "Linear correlation coefficient between judge and human labels -- "
                 "for two binary (0/1) variables this is the phi coefficient, "
                 "algebraically equivalent to Cohen's κ's numerator rescaled by "
                 "the marginal proportions."
             ),
-            "why": (
+            pearson_why=(
                 "Reported alongside Cohen's κ/percent agreement because a "
                 "PPI-corrected hypothesis test's variance reduction is governed "
                 "by this correlation (or its rank-based counterpart below), not "
                 "by κ -- see the label-efficiency guidance in the package docs "
                 "for which one your test needs."
             ),
-            "interpretation": interp,
-            "example": example,
-        }
-        est, lo, hi = _ci2(sp, llm, human, alpha=alpha, rng=rng)
-        band, interp, example = _interpret_corr(est, lo, hi, len(llm), "Spearman r")
-        metrics["spearman_r"] = {
-            "estimate": est, "ci_low": lo, "ci_high": hi,
-            "label": "Spearman r",
-            "band": band,
-            "what": (
+            spearman_what=(
                 "Rank correlation between judge and human labels -- for two "
                 "binary (0/1) variables this is numerically identical to "
                 "Pearson r above (rank-transforming a two-valued variable is "
                 "just an increasing affine rescaling of it, which Pearson r is "
                 "invariant to)."
             ),
-            "why": (
+            spearman_why=(
                 "Reported for consistency with the continuous/likert score "
                 "types, and because rank-based hypothesis tests (e.g. "
                 "Mann-Whitney) predict their PPI variance reduction from this "
                 "correlation, not Pearson's."
             ),
-            "interpretation": interp,
-            "example": example,
-        }
+        ))
 
     elif score_type == "likert":
         cats = sorted(set(llm.tolist()) | set(human.tolist()))
@@ -892,14 +870,6 @@ def _compute_alignment_metrics(
             p_b = np.array([(b == c).mean() for c in cats])
             p_e = float((p_a[:, None] * p_b[None, :] * wm).sum())
             return (p_o - p_e) / (1.0 - p_e) if p_e < 1.0 else 1.0
-
-        def sp(a, b):
-            r, _ = spearmanr(a, b)
-            return float(r)
-
-        def pe(a, b):
-            r, _ = pearsonr(a, b)
-            return float(r)
 
         if k >= 2:
             est, lo, hi = _ci2(wk, llm, human, alpha=alpha, rng=rng)
@@ -924,17 +894,14 @@ def _compute_alignment_metrics(
                 "interpretation": interp,
                 "example": example,
             }
-        est, lo, hi = _ci2(pe, llm, human, alpha=alpha, rng=rng)
-        band, interp, example = _interpret_corr(est, lo, hi, len(llm), "Pearson r")
-        metrics["pearson_r"] = {
-            "estimate": est, "ci_low": lo, "ci_high": hi,
-            "label": "Pearson r",
-            "band": band,
-            "what": (
+        metrics.update(_pearson_spearman_metrics(
+            llm, human, alpha=alpha, rng=rng, ci2_fn=_ci2,
+            pearson_label="Pearson r", spearman_label="Spearman r",
+            pearson_what=(
                 "Linear correlation coefficient between judge and human scores, "
                 "treating the Likert categories as equally-spaced numeric values."
             ),
-            "why": (
+            pearson_why=(
                 "Reported alongside weighted κ/Spearman r because a PPI-corrected "
                 "parametric or mean-based test (e.g. a $t$-test on Likert scores "
                 "treated as numeric) draws its variance reduction from this "
@@ -942,28 +909,17 @@ def _compute_alignment_metrics(
                 "see the label-efficiency guidance in the package docs for which "
                 "one your test needs."
             ),
-            "interpretation": interp,
-            "example": example,
-        }
-        est, lo, hi = _ci2(sp, llm, human, alpha=alpha, rng=rng)
-        band, interp, example = _interpret_corr(est, lo, hi, len(llm), "Spearman r")
-        metrics["spearman_r"] = {
-            "estimate": est, "ci_low": lo, "ci_high": hi,
-            "label": "Spearman r",
-            "band": band,
-            "what": (
+            spearman_what=(
                 "Rank correlation between judge and human scores. Checks whether "
                 "higher judge scores correspond to higher human scores, without "
                 "assuming the categories are equally spaced."
             ),
-            "why": (
+            spearman_why=(
                 "Reported alongside weighted κ to show whether the judge preserves "
                 "relative ordering, which matters if judge scores are mainly used "
                 "to rank or compare outputs."
             ),
-            "interpretation": interp,
-            "example": example,
-        }
+        ))
 
         if k >= 2:
             icc_est, icc_lo, icc_hi = _ci2(_icc_21, llm, human, alpha=alpha, rng=rng)
@@ -1000,39 +956,21 @@ def _compute_alignment_metrics(
             r, _ = pearsonr(a, b)
             return float(r)
 
-        def sp(a, b):
-            r, _ = spearmanr(a, b)
-            return float(r)
-
-        est, lo, hi = _ci2(pe, llm, human, alpha=alpha, rng=rng)
-        band, interp, example = _interpret_corr(est, lo, hi, len(llm), "Pearson r")
-        metrics["pearson_r"] = {
-            "estimate": est, "ci_low": lo, "ci_high": hi,
-            "label": "Pearson r",
-            "band": band,
-            "what": "Linear correlation coefficient between judge and human scores.",
-            "why": (
+        metrics.update(_pearson_spearman_metrics(
+            llm, human, alpha=alpha, rng=rng, ci2_fn=_ci2,
+            pearson_label="Pearson r", spearman_label="Spearman r",
+            pearson_what="Linear correlation coefficient between judge and human scores.",
+            pearson_why=(
                 "Your judge produces continuous/numeric scores, so a correlation "
                 "coefficient is the standard way to summarize agreement."
             ),
-            "interpretation": interp,
-            "example": example,
-        }
-        est, lo, hi = _ci2(sp, llm, human, alpha=alpha, rng=rng)
-        band, interp, example = _interpret_corr(est, lo, hi, len(llm), "Spearman r")
-        metrics["spearman_r"] = {
-            "estimate": est, "ci_low": lo, "ci_high": hi,
-            "label": "Spearman r",
-            "band": band,
-            "what": "Rank correlation between judge and human scores.",
-            "why": (
+            spearman_what="Rank correlation between judge and human scores.",
+            spearman_why=(
                 "Reported alongside Pearson r to check whether agreement holds even "
                 "if the judge-human relationship is monotonic but non-linear (e.g. "
                 "the judge saturates at high scores)."
             ),
-            "interpretation": interp,
-            "example": example,
-        }
+        ))
 
         icc_est, icc_lo, icc_hi = _ci2(_icc_21, llm, human, alpha=alpha, rng=rng)
         band, interp, example = _interpret_icc(icc_est, icc_lo, icc_hi, len(llm), "ICC(2,1)")
@@ -2255,13 +2193,26 @@ def _linearize_for_test(
 def _pearson_spearman_metrics(
     judge: np.ndarray, human: np.ndarray, *, alpha: float, rng: np.random.Generator,
     pearson_label: str, spearman_label: str, what_suffix: str = "",
+    ci2_fn=_bootstrap_ci_2,
+    pearson_what: Optional[str] = None,
+    pearson_why: Optional[str] = None,
+    spearman_what: Optional[str] = None,
+    spearman_why: Optional[str] = None,
 ) -> dict:
     """Pearson r and Spearman r (point estimate + bootstrap CI) between two
     already-prepared 1-D arrays -- the shared low-level computation behind
-    the multi-condition pairwise path below, so there is exactly one place
-    this math lives. Callers are responsible for whatever
-    differencing/pooling/masking the two arrays need before calling this
-    (see :func:`_condition_pair_arrays`).
+    both the multi-condition pairwise path and the single-condition
+    :func:`_compute_alignment_metrics`, so there is exactly one place this
+    math lives. Callers are responsible for whatever differencing/pooling/
+    masking the two arrays need before calling this (see
+    :func:`_condition_pair_arrays`).
+
+    ``ci2_fn`` defaults to :func:`_bootstrap_ci_2` but can be swapped for a
+    cheaper stand-in (e.g. skipping the bootstrap entirely) by callers that
+    don't need a CI, matching :func:`_compute_alignment_metrics`'s ``ci=``
+    parameter. ``pearson_what``/``pearson_why``/``spearman_what``/
+    ``spearman_why`` override the generic "what"/"why" text below when a
+    caller has more specific, score-type-tailored wording to show instead.
     """
     n = len(judge)
 
@@ -2273,23 +2224,23 @@ def _pearson_spearman_metrics(
         r, _ = spearmanr(a, b)
         return float(r)
 
-    est, lo, hi = _bootstrap_ci_2(pe, judge, human, alpha=alpha, rng=rng)
+    est, lo, hi = ci2_fn(pe, judge, human, alpha=alpha, rng=rng)
     band, interp, example = _interpret_corr(est, lo, hi, n, pearson_label)
     pearson_entry = {
         "estimate": est, "ci_low": lo, "ci_high": hi, "label": pearson_label, "band": band, "n": n,
-        "what": f"Linear correlation coefficient between judge and human values{what_suffix}.",
-        "why": (
+        "what": pearson_what or f"Linear correlation coefficient between judge and human values{what_suffix}.",
+        "why": pearson_why or (
             "Governs the label-efficiency multiplier for parametric/mean-based "
             "tests (t-test, ANOVA, mean estimation) -- see judge_alignment()'s test=."
         ),
         "interpretation": interp, "example": example,
     }
-    est, lo, hi = _bootstrap_ci_2(sp, judge, human, alpha=alpha, rng=rng)
+    est, lo, hi = ci2_fn(sp, judge, human, alpha=alpha, rng=rng)
     band, interp, example = _interpret_corr(est, lo, hi, n, spearman_label)
     spearman_entry = {
         "estimate": est, "ci_low": lo, "ci_high": hi, "label": spearman_label, "band": band, "n": n,
-        "what": f"Rank correlation coefficient between judge and human values{what_suffix}.",
-        "why": (
+        "what": spearman_what or f"Rank correlation coefficient between judge and human values{what_suffix}.",
+        "why": spearman_why or (
             "Governs the label-efficiency multiplier for rank-based tests "
             "(Mann-Whitney, Wilcoxon, Friedman) -- see judge_alignment()'s test=."
         ),

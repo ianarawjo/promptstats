@@ -1419,6 +1419,41 @@ def _apply_max_t_cis(
     se_safe = np.where(valid, se, 1.0)
     T = (boot_stats - point_ests[np.newaxis, :]) / se_safe[np.newaxis, :]  # (B, k)
     M_b = np.max(np.abs(T[:, valid]), axis=1)  # (B,)
+
+    return _max_t_cis_from_null_dist(M_b, se, valid, point_ests, pairs, ci)
+
+
+def _max_t_cis_from_null_dist(
+    M_b: np.ndarray,
+    se: np.ndarray,
+    valid: np.ndarray,
+    point_ests: np.ndarray,
+    pairs: list,
+    ci: float,
+) -> tuple[dict, dict]:
+    """Build simultaneous CIs/p-values from an already-computed max-|T| null
+    distribution and per-pair SEs -- the final step shared by
+    :func:`_apply_max_t_cis` (plain bootstrap SE) and the studentized
+    bootstrap-t branch of :func:`_max_stat_simultaneous_cis` (per-replicate
+    SE), which differ only in how ``M_b``/``se`` were computed upstream, not
+    in how a critical value and per-pair CI/p-value are built from them.
+
+    Parameters
+    ----------
+    M_b : np.ndarray, shape (B,)
+        Bootstrap draws of the max standardized statistic across pairs.
+    se : np.ndarray, shape (k,)
+        Per-pair standard error used both to build the CI half-width and to
+        studentize the observed point estimate for the p-value.
+    valid : np.ndarray, shape (k,), bool
+        Which pairs have a usable (non-degenerate) SE.
+    point_ests : np.ndarray, shape (k,)
+        Observed pairwise point estimates.
+    pairs : list[tuple[str, str]]
+        Pair labels in the same order as *se*/*point_ests*.
+    ci : float
+        Simultaneous confidence level (e.g. 0.95).
+    """
     c = float(np.quantile(M_b, ci))
     B_total = len(M_b)
 
@@ -1732,32 +1767,14 @@ def _max_stat_simultaneous_cis(
             se_b_safe = np.where(boot_ses_b > 1e-12, boot_ses_b, 1.0)
             T_stud = (boot_means_b - point_ests) / se_b_safe  # (B, k)
 
-            obs_se_safe = np.where(obs_se > 1e-12, obs_se, 1.0)
-            t_obs_stud = np.abs(point_ests) / obs_se_safe  # (k,)
             se_valid_b = obs_se > 1e-12
             if not np.any(se_valid_b):
                 return {}, {}
 
             M_b_stud = np.max(np.abs(T_stud[:, se_valid_b]), axis=1)  # (B,)
-            c_stud = float(np.quantile(M_b_stud, ci))
-            B_total_stud = len(M_b_stud)
-
-            sim_cis_stud: dict = {}
-            max_t_pvalues_stud: dict = {}
-            for p_idx, pair in enumerate(pairs):
-                if se_valid_b[p_idx]:
-                    half = c_stud * float(obs_se[p_idx])
-                    sim_cis_stud[pair] = (
-                        float(point_ests[p_idx] - half),
-                        float(point_ests[p_idx] + half),
-                    )
-                    t_val = float(t_obs_stud[p_idx])
-                    extreme = int(np.sum(M_b_stud >= t_val))
-                    max_t_pvalues_stud[pair] = float((extreme + 1) / (B_total_stud + 1))
-                else:
-                    sim_cis_stud[pair] = (float(point_ests[p_idx]), float(point_ests[p_idx]))
-                    max_t_pvalues_stud[pair] = 1.0
-            return sim_cis_stud, max_t_pvalues_stud
+            return _max_t_cis_from_null_dist(
+                M_b_stud, obs_se, se_valid_b, point_ests, pairs, ci,
+            )
 
         else:
             # bootstrap, bca, permutation, sign_test, bootstrap_t+median —
@@ -2023,7 +2040,7 @@ def _joint_bootstrap_critical_value(
 _CALIBRATED_JOINT_MAX_RESAMPLES = 1500
 
 
-def _scipy_stats_norm_ppf(a: float) -> float:
+def _two_sided_alpha_to_z(a: float) -> float:
     """z such that 2*(1-Phi(z)) == a -- the inverse of the alpha_eff step in
     _calibrated_joint_simultaneous_cis, so an exactly-calibrated alpha survives
     the round trip through that conversion unchanged."""
@@ -2136,7 +2153,7 @@ def _calibrated_joint_critical_value(
             np.minimum(a_min, a_r, out=a_min)
         alpha_star = float(np.quantile(a_min, 1.0 - ci))
         alpha_star = min(max(alpha_star, 1e-12), 1.0 - 1e-12)
-        return -float(_scipy_stats_norm_ppf(alpha_star))
+        return -float(_two_sided_alpha_to_z(alpha_star))
 
     batch = getattr(ci_func, "centre_scale_batch", None)
     if batch is not None:

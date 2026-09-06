@@ -28,6 +28,8 @@ import numpy as np
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
 
+from ._palette import GRID, TEXT, TEXT_SECONDARY
+
 if TYPE_CHECKING:
     from matplotlib.axes import Axes
     from matplotlib.figure import Figure
@@ -42,10 +44,10 @@ _PALETTE = {
     "lower_tier":    "#e07b7b",  # muted red    — lower-tier CIs
     "no_sig":        "#8a9bb5",  # gray-blue    — no significant differences
     "ref_line":      "#cccccc",  # light gray   — reference line
-    "grid":          "#EEF1F4",  # very light   — x grid
+    "grid":          GRID,
     "row_alt":       "#FAFBFC",  # off-white    — alternating rows
-    "text":          "#2D333B",  # dark slate   — axis labels
-    "text_secondary":"#6B7280",  # muted gray   — secondary text
+    "text":          TEXT,
+    "text_secondary":TEXT_SECONDARY,
 }
 
 # Per-band opacity for the gradient style, outermost (widest CI, 99%) to
@@ -202,6 +204,57 @@ def _place_legend_and_trim(fig, ax, legend_handles: list, own_fig: bool, font_sc
                 left=min(0.99, sp.left * scale),
                 right=min(1.0, sp.right * scale),
             )
+
+
+def _build_title_and_caption(
+    ax,
+    *,
+    title: Optional[str],
+    subject: str,
+    n_inputs,
+    alpha: float,
+    ci_method,
+    correction,
+    any_gradient_used: bool,
+    font_scale: float,
+) -> None:
+    """Resolve the default title (when *title* is ``None``) and draw the
+    self-contained methods caption beneath it -- shared by
+    :func:`plot_ci_forest` and :func:`_plot_ci_forest_grouped`, which differ
+    only in *subject* (the "per ___" noun phrase in the default title) and
+    where they read *n_inputs*/*ci_method*/*correction* from.
+
+    The caption travels with the figure once it's copied out of evalstats
+    (into a paper, a slide, a post), so the CI method/correction it was
+    computed with doesn't only live in the surrounding terminal report.
+    """
+    def _pretty(s: Optional[str]) -> Optional[str]:
+        return s.replace("_", " ") if s else None
+
+    if title is None:
+        ci_pct = int(round((1 - alpha) * 100))
+        n_str = f"  |  N={n_inputs} inputs" if n_inputs else ""
+        ci_label = "68-99% confidence gradient" if any_gradient_used else f"{ci_pct}% confidence intervals"
+        title = f"{ci_label} per {subject}{n_str}"
+
+    caption_parts = []
+    pretty_ci_method = _pretty(ci_method)
+    if pretty_ci_method:
+        caption_parts.append(f"CI method: {pretty_ci_method}")
+    pretty_correction = _pretty(correction)
+    if pretty_correction and pretty_correction != "none":
+        caption_parts.append(f"FWER correction: {pretty_correction}")
+    caption_parts.append(f"α={alpha:g}")
+    if any_gradient_used:
+        caption_parts.append("darker band = higher confidence")
+    caption = "  |  ".join(caption_parts)
+
+    ax.set_title(title, fontsize=10 * font_scale, color=_PALETTE["text"], pad=24 if caption else 10, loc="center")
+    if caption:
+        ax.text(
+            0.5, 1.02, caption, transform=ax.transAxes, ha="center", va="bottom",
+            fontsize=7.5 * font_scale, color=_PALETTE["text_secondary"],
+        )
 
 
 def _resolve_factors(report, factors):
@@ -414,36 +467,14 @@ def _plot_ci_forest_grouped(
 
     n_inputs = getattr(getattr(cross, "benchmark", None), "n_inputs", None)
     alpha = report.alpha
-    ci_pct = int(round((1 - alpha) * 100))
     ci_method = getattr(cross, "resolved_ci_method", None)
     correction = getattr(getattr(cross, "pairwise", None), "correction_method", None)
 
-    def _pretty(s: Optional[str]) -> Optional[str]:
-        return s.replace("_", " ") if s else None
-
-    if title is None:
-        n_str = f"  |  N={n_inputs} inputs" if n_inputs else ""
-        ci_label = "68-99% confidence gradient" if any_gradient_used else f"{ci_pct}% confidence intervals"
-        title = f"{ci_label} per {outer} / {inner}{n_str}"
-
-    caption_parts = []
-    pretty_ci_method = _pretty(ci_method)
-    if pretty_ci_method:
-        caption_parts.append(f"CI method: {pretty_ci_method}")
-    pretty_correction = _pretty(correction)
-    if pretty_correction and pretty_correction != "none":
-        caption_parts.append(f"FWER correction: {pretty_correction}")
-    caption_parts.append(f"α={alpha:g}")
-    if any_gradient_used:
-        caption_parts.append("darker band = higher confidence")
-    caption = "  |  ".join(caption_parts)
-
-    ax.set_title(title, fontsize=10 * font_scale, color=_PALETTE["text"], pad=24 if caption else 10, loc="center")
-    if caption:
-        ax.text(
-            0.5, 1.02, caption, transform=ax.transAxes, ha="center", va="bottom",
-            fontsize=7.5 * font_scale, color=_PALETTE["text_secondary"],
-        )
+    _build_title_and_caption(
+        ax, title=title, subject=f"{outer} / {inner}", n_inputs=n_inputs, alpha=alpha,
+        ci_method=ci_method, correction=correction, any_gradient_used=any_gradient_used,
+        font_scale=font_scale,
+    )
 
     legend_handles: list = []
     if any_gradient_used:
@@ -823,54 +854,19 @@ def plot_ci_forest(
 
     n_inputs = getattr(getattr(bundle, "benchmark", None), "n_inputs", None)
     alpha = getattr(report, "alpha", 0.05)
-    ci_pct = int(round((1 - alpha) * 100))
+    ci_pct = int(round((1 - alpha) * 100))  # also used by the CI-bracket legend below
     ci_method = getattr(bundle, "resolved_ci_method", None)
     correction = getattr(getattr(bundle, "pairwise", None), "correction_method", None)
 
-    def _pretty(s: Optional[str]) -> Optional[str]:
-        return s.replace("_", " ") if s else None
-
-    # ---- title + methods subtitle ------------------------------------------
-    if title is None:
-        n_str = f"  |  N={n_inputs} inputs" if n_inputs else ""
-        if any_gradient_used:
-            ci_label = "68-99% confidence gradient"
-        else:
-            ci_label = f"{ci_pct}% confidence intervals"
-        title = f"{ci_label} per {report.entity_name_singular}{n_str}"
-
-    # Self-contained methods subtitle -- this figure is meant to stand on
-    # its own once copied out of evalstats (into a paper, a slide, a post),
-    # so the CI method/correction it was computed with travels with it
-    # rather than only living in the surrounding terminal report. Placed
-    # between the title and the axes (not below the plot) so it doesn't
-    # read as a second, redundant caption once a LaTeX \caption{} is added
-    # underneath the whole figure.
-    caption_parts = []
-    pretty_ci_method = _pretty(ci_method)
-    if pretty_ci_method:
-        caption_parts.append(f"CI method: {pretty_ci_method}")
-    pretty_correction = _pretty(correction)
-    if pretty_correction and pretty_correction != "none":
-        caption_parts.append(f"FWER correction: {pretty_correction}")
-    caption_parts.append(f"α={alpha:g}")
-    if any_gradient_used:
-        caption_parts.append("darker band = higher confidence")
-    caption = "  |  ".join(caption_parts)
-
-    ax.set_title(
-        title,
-        fontsize=10 * font_scale,
-        color=_PALETTE["text"],
-        pad=24 if caption else 10,
-        loc="center",
+    # Self-contained title + methods subtitle -- this figure is meant to
+    # stand on its own once copied out of evalstats (into a paper, a slide,
+    # a post), so the CI method/correction it was computed with travels
+    # with it rather than only living in the surrounding terminal report.
+    _build_title_and_caption(
+        ax, title=title, subject=report.entity_name_singular, n_inputs=n_inputs, alpha=alpha,
+        ci_method=ci_method, correction=correction, any_gradient_used=any_gradient_used,
+        font_scale=font_scale,
     )
-    if caption:
-        ax.text(
-            0.5, 1.02, caption,
-            transform=ax.transAxes, ha="center", va="bottom",
-            fontsize=7.5 * font_scale, color=_PALETTE["text_secondary"],
-        )
 
     # ---- legend -------------------------------------------------------------
     # One combined legend: entity-tier colours, plus (in gradient mode) a

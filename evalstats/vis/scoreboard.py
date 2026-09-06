@@ -14,6 +14,8 @@ import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 import numpy as np
 
+from ._palette import GRID, TEXT, TEXT_SECONDARY
+
 if TYPE_CHECKING:
     from matplotlib.axes import Axes
     from matplotlib.figure import Figure
@@ -27,10 +29,10 @@ _PALETTE = {
     "bar":           "#94b8e0",  # soft blue   — bars
     "bar_highlight": "#4a90d9",  # medium blue — highlighted bar
     "baseline_line": "#777777",  # mid gray    — baseline reference
-    "grid":          "#EEF1F4",  # very light  — y grid
-    "text":          "#2D333B",  # dark slate  — axis labels
-    "text_secondary":"#6B7280",  # muted gray  — tick labels
-    "errorbar":      "#2D333B",  # dark slate  — CI whiskers/caps
+    "grid":          GRID,
+    "text":          TEXT,
+    "text_secondary":TEXT_SECONDARY,
+    "errorbar":      TEXT,
 }
 
 

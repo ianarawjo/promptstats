@@ -32,6 +32,7 @@ import numpy as np
 from evalstats.vis.forest import _PALETTE
 
 if TYPE_CHECKING:
+    from matplotlib.axes import Axes
     from matplotlib.figure import Figure
 
 
@@ -255,6 +256,7 @@ def plot_pareto_tradeoff(
     n_frontier_replicates: int = 1500,
     figsize: Optional[tuple[float, float]] = None,
     rng: Optional[np.random.Generator] = None,
+    ax: Optional["Axes"] = None,
 ) -> "Figure":
     """Scatter plot of the primary vs. secondary metric, one bootstrap point
     cloud per entity, colored/marked by Pareto status.
@@ -292,6 +294,9 @@ def plot_pareto_tradeoff(
     rng : np.random.Generator, optional
         Controls which replicates are subsampled for display. Reproducible
         by default (a fixed internal seed) when omitted.
+    ax : matplotlib.axes.Axes, optional
+        Draw into this existing axes instead of creating a new figure --
+        for composing this plot into a multi-panel figure alongside others.
 
     Returns
     -------
@@ -330,8 +335,12 @@ def plot_pareto_tradeoff(
     label_scale = min(figsize[0] / 7.0, figsize[1] / 5.2)
     label_offsets = _assign_label_offsets(xs, ys, scale=label_scale)
 
-    fig, ax = plt.subplots(figsize=figsize)
-    fig.patch.set_facecolor("white")
+    own_fig = ax is None
+    if own_fig:
+        fig, ax = plt.subplots(figsize=figsize)
+        fig.patch.set_facecolor("white")
+    else:
+        fig = ax.get_figure()
     ax.set_facecolor("white")
 
     rng = np.random.default_rng(rng) if rng is not None else np.random.default_rng(0)
@@ -405,5 +414,6 @@ def plot_pareto_tradeoff(
             fontsize=8.5, frameon=False,
         )
 
-    fig.tight_layout()
+    if own_fig:
+        fig.tight_layout()
     return fig

@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 
 from evalstats.core.types import BenchmarkResult, MultiModelBenchmark
+from evalstats.loader import _CANONICAL_ALIASES, _SCORE_ALIASES, _find_col
 
 
 @dataclass
@@ -89,19 +90,11 @@ def from_dataframe(
 
 def _detect_format(df: pd.DataFrame) -> Literal["wide", "long"]:
     cols_lower = {c.lower().strip() for c in df.columns}
-    has_template = bool(cols_lower & {"template", "prompt", "prompt_template"})
-    has_input = bool(cols_lower & {"input", "example", "item", "id", "input_label"})
-    has_score = bool(cols_lower & {"score", "value", "result", "metric"})
-    has_model = bool(cols_lower & {"model", "model_label", "model_name"})
+    has_template = bool(cols_lower & set(_CANONICAL_ALIASES["prompt"]))
+    has_input = bool(cols_lower & set(_CANONICAL_ALIASES["item"]))
+    has_score = bool(cols_lower & set(_SCORE_ALIASES))
+    has_model = bool(cols_lower & set(_CANONICAL_ALIASES["model"]))
     return "long" if (has_score and has_input and (has_template or has_model)) else "wide"
-
-
-def _find_col(df: pd.DataFrame, aliases: list[str]) -> Optional[str]:
-    lower_map = {c.lower().strip(): c for c in df.columns}
-    for alias in aliases:
-        if alias in lower_map:
-            return lower_map[alias]
-    return None
 
 
 def _from_wide(
@@ -151,11 +144,13 @@ def _from_long(
     repair: bool,
     strict_complete_design: bool,
 ) -> ResultType:
-    template_col = _find_col(df, ["template", "prompt", "prompt_template"])
-    input_col = _find_col(df, ["input", "example", "item", "id", "input_label"])
-    score_col = _find_col(df, ["score", "value", "result", "metric"])
-    model_col = _find_col(df, ["model", "model_label", "model_name"])
-    run_col = _find_col(df, ["run", "seed", "repeat", "run_id", "trial"])
+    template_col = _find_col(df, _CANONICAL_ALIASES["prompt"])
+    input_col = _find_col(df, _CANONICAL_ALIASES["item"])
+    score_col = _find_col(df, _SCORE_ALIASES)
+    model_col = _find_col(df, _CANONICAL_ALIASES["model"])
+    run_col = _find_col(df, _CANONICAL_ALIASES["run"])
+    # No canonical "evaluator" role in loader.py's alias table (it's an
+    # io.py-specific concept), so this one stays local.
     evaluator_col = _find_col(df, ["evaluator", "eval", "judge", "criterion", "metric_name"])
 
     inject_implicit_template = (

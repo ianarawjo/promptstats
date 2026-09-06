@@ -19,9 +19,11 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 if TYPE_CHECKING:
+    from matplotlib.axes import Axes
     from matplotlib.figure import Figure
 
 from evalstats.core.types import MultiModelBenchmark
+from ._palette import TEXT, TEXT_SECONDARY
 
 
 def plot_model_prompt_heatmap(
@@ -37,6 +39,7 @@ def plot_model_prompt_heatmap(
     annot_fmt: str = ".2f",
     annot_fontsize: float = 9.0,
     figsize: Optional[tuple[float, float]] = None,
+    ax: Optional["Axes"] = None,
 ) -> "Figure":
     """Heatmap of mean scores across models (rows) and prompts (columns).
 
@@ -80,6 +83,9 @@ def plot_model_prompt_heatmap(
     figsize : tuple[float, float], optional
         Figure size in inches.  Defaults to
         ``(max(6, 0.9 * n_prompts + 2), max(4, 0.55 * n_models + 1.5))``.
+    ax : matplotlib.axes.Axes, optional
+        Draw into this existing axes instead of creating a new figure --
+        for composing this plot into a multi-panel figure alongside others.
 
     Returns
     -------
@@ -155,8 +161,12 @@ def plot_model_prompt_heatmap(
         h = max(4.0, 0.55 * n_models + 1.5)
         figsize = (w, h)
 
-    fig, ax = plt.subplots(figsize=figsize)
-    fig.patch.set_facecolor("white")
+    own_fig = ax is None
+    if own_fig:
+        fig, ax = plt.subplots(figsize=figsize)
+        fig.patch.set_facecolor("white")
+    else:
+        fig = ax.get_figure()
     ax.set_facecolor("white")
 
     # ------------------------------------------------------------------ #
@@ -200,13 +210,13 @@ def plot_model_prompt_heatmap(
     # Axes ticks and labels                                                #
     # ------------------------------------------------------------------ #
     ax.set_xticks(np.arange(n_prompts))
-    ax.set_xticklabels(col_labels, fontsize=9, color="#2D333B")
+    ax.set_xticklabels(col_labels, fontsize=9, color=TEXT)
 
     ax.set_yticks(np.arange(n_models))
-    ax.set_yticklabels(row_labels, fontsize=9, color="#2D333B", ha="right")
+    ax.set_yticklabels(row_labels, fontsize=9, color=TEXT, ha="right")
 
-    ax.set_xlabel("Prompt", fontsize=10, color="#2D333B", labelpad=8)
-    ax.set_ylabel("Model", fontsize=10, color="#2D333B", labelpad=8)
+    ax.set_xlabel("Prompt", fontsize=10, color=TEXT, labelpad=8)
+    ax.set_ylabel("Model", fontsize=10, color=TEXT, labelpad=8)
 
     ax.tick_params(axis="both", length=0, pad=5)
 
@@ -223,10 +233,10 @@ def plot_model_prompt_heatmap(
     cbar.set_label(
         f"Avg {metric_name} Score",
         fontsize=9,
-        color="#2D333B",
+        color=TEXT,
         labelpad=8,
     )
-    cbar.ax.tick_params(labelsize=8, colors="#6B7280")
+    cbar.ax.tick_params(labelsize=8, colors=TEXT_SECONDARY)
     cbar.outline.set_visible(False)
 
     # ------------------------------------------------------------------ #
@@ -238,10 +248,11 @@ def plot_model_prompt_heatmap(
     ax.set_title(
         title,
         fontsize=12,
-        color="#2D333B",
+        color=TEXT,
         pad=12,
         fontweight="semibold",
     )
 
-    fig.tight_layout()
+    if own_fig:
+        fig.tight_layout()
     return fig

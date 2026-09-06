@@ -30,6 +30,7 @@ from evalstats.core.resampling import is_binary_scores
 from evalstats.vis.forest import _PALETTE
 
 if TYPE_CHECKING:
+    from matplotlib.axes import Axes
     from matplotlib.figure import Figure
 
     from evalstats.core.bundles import AnalysisBundle
@@ -40,6 +41,7 @@ def plot_run_disagreement(
     *,
     title: Optional[str] = None,
     figsize: Optional[tuple[float, float]] = None,
+    ax: Optional["Axes"] = None,
 ) -> "Figure":
     """Bar chart of per-item run-to-run disagreement, one row per model/template.
 
@@ -62,6 +64,9 @@ def plot_run_disagreement(
     figsize : tuple[float, float], optional
         Figure size. Defaults to a compact height that scales with the
         number of models/templates shown.
+    ax : matplotlib.axes.Axes, optional
+        Draw into this existing axes instead of creating a new figure --
+        for composing this plot into a multi-panel figure alongside others.
 
     Returns
     -------
@@ -101,10 +106,14 @@ def plot_run_disagreement(
     ROW_H = 0.28
     GAP = 0.15
     TOP_PAD = 0.08  # headroom so a full-height bar in row 0 doesn't crowd the subtitle
-    if figsize is None:
-        figsize = (9.5, 0.5 * n_models * (ROW_H + GAP) + 1.1)
-    fig, ax = plt.subplots(figsize=figsize)
-    fig.patch.set_facecolor("white")
+    own_fig = ax is None
+    if own_fig:
+        if figsize is None:
+            figsize = (9.5, 0.5 * n_models * (ROW_H + GAP) + 1.1)
+        fig, ax = plt.subplots(figsize=figsize)
+        fig.patch.set_facecolor("white")
+    else:
+        fig = ax.get_figure()
     ax.set_facecolor("white")
 
     x = np.arange(n_items) + 0.5
@@ -159,5 +168,6 @@ def plot_run_disagreement(
         fontsize=8, color=_PALETTE["text_secondary"],
     )
 
-    fig.subplots_adjust(right=0.62)
+    if own_fig:
+        fig.subplots_adjust(right=0.62)
     return fig
