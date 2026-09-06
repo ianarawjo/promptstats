@@ -47,10 +47,8 @@ from .resampling import (
     tango_scc_paired_ci,
     bonett_price_paired_ci_from_diffs,
     mj_floor_paired_ci_from_diffs,
-    mj_floor_paired_ci_multirun_effective,
     mj_floor_paired_ci_multirun_cluster,
     bonett_price_paired_ci,
-    bonett_price_paired_ci_multirun_cluster,
     bonett_price_paired_ci_multirun_shrunk,
     t_interval_ci_1d,
     logit_t_ci_1d,
@@ -358,6 +356,9 @@ class PairwiseMatrix:
             if r.binary_confusion is not None:
                 n11, n10, n01, n00 = r.binary_confusion
                 flipped_conf = (n11, n01, n10, n00)
+            flipped_multi_ci: Optional[dict[float, tuple[float, float]]] = None
+            if r.multi_ci is not None:
+                flipped_multi_ci = {a_: (-hi, -lo) for a_, (lo, hi) in r.multi_ci.items()}
             # Flip the result
             return PairedDiffResult(
                 template_a=a,
@@ -375,6 +376,7 @@ class PairwiseMatrix:
                 wilcoxon_p=r.wilcoxon_p,  # two-sided, so p is the same when flipping direction
                 agreement_mcc=r.agreement_mcc,
                 binary_confusion=flipped_conf,
+                multi_ci=flipped_multi_ci,
             )
         raise KeyError(f"No comparison found for ({a}, {b})")
 
@@ -2467,7 +2469,7 @@ def _simultaneous_cis_router(
     regardless of N (see :func:`~evalstats.config.resolve_auto_simultaneous_ci_method`),
     else joint bootstrap with an effective alpha (``"boot"``,
     :func:`_joint_bootstrap_scaled_simultaneous_cis`). Both widen whichever
-    canonical closed-form pairwise CI formula the data resolves to -- Tango
+    canonical closed-form pairwise CI formula the data resolves to -- Bonett-Price
     for binary data, logit-t for any bounded numeric range (*score_range*),
     plain t-interval as the bounds-agnostic fallback for everything else --
     the same per-data-kind formula :data:`~evalstats.config.AUTO_ANALYZE_METHOD_TABLE`
@@ -2702,8 +2704,8 @@ def all_pairwise(
     rng : np.random.Generator, optional
         Random number generator for reproducibility.
     statistic : str
-        Point-estimate and bootstrap statistic: ``'median'`` (default) or
-        ``'mean'``.
+        Point-estimate and bootstrap statistic: ``'mean'`` (default) or
+        ``'median'``.
     simultaneous_ci : bool
         When ``True``, replace individual pairwise CIs with simultaneous
         (family-wise) CIs. Routes through :func:`_simultaneous_cis_router`
@@ -2739,8 +2741,6 @@ def all_pairwise(
         ``False`` — the Friedman test is a NHST procedure that may not be
         desirable in estimation-focused workflows.  The result is stored in
         :attr:`PairwiseMatrix.friedman`.
-        ``'bonferroni'``) and annotated in each result's ``test_method``
-        string.
     compute_wilcoxon : bool
         Forwarded to each :func:`pairwise_differences` call (default
         ``True``). Set ``False`` to skip the supplementary Wilcoxon
@@ -2937,8 +2937,8 @@ def vs_baseline(
     method, ci, n_bootstrap, correction, rng :
         Same as ``all_pairwise``.
     statistic : str
-        Point-estimate and bootstrap statistic: ``'median'`` (default) or
-        ``'mean'``.
+        Point-estimate and bootstrap statistic: ``'mean'`` (default) or
+        ``'median'``.
 
     Returns
     -------
@@ -2995,6 +2995,9 @@ def vs_baseline(
                 n_runs=r.n_runs,
                 statistic=r.statistic,
                 wilcoxon_p=wsr_adj_map.get((r.template_a, r.template_b), r.wilcoxon_p),
+                agreement_mcc=r.agreement_mcc,
+                binary_confusion=r.binary_confusion,
+                multi_ci=r.multi_ci,
             )
             for r, adj_p in zip(results, adjusted)
         ]

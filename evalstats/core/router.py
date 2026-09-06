@@ -25,7 +25,6 @@ from .bundles import (
     BenchmarkShape,
     AnalysisBundle,
     MultiModelBundle,
-    PerEvaluatorSingleModel,
     PerEvaluatorMultiModel,
     AnalysisResult,
 )
@@ -356,7 +355,7 @@ def analyze(
 
     include_multi_ci = ci_style == "gradient"
 
-    if method not in {"lmm", "bayes_bootstrap", "smooth_bootstrap", "auto", "bayes_binary", "wilson", "mj_floor", "newcombe", "tango", "permutation", "sign_test", "t_interval", "logit_t"} and result.n_inputs < 15:
+    if method not in {"lmm", "bayes_bootstrap", "smooth_bootstrap", "auto", "bayes_binary", "wilson", "mj_floor", "newcombe", "tango", "bonett_price", "permutation", "sign_test", "t_interval", "logit_t", "nig"} and result.n_inputs < 15:
         warnings.warn(
             f"Only M={result.n_inputs} benchmark input(s) detected. "
             "Bootstrap confidence intervals are unreliable with fewer than ~15 inputs. "
@@ -1133,56 +1132,6 @@ def _analyze_single(
         resolved_data_kind=data_kind,
         p_value_method=p_value_method,
     )
-
-
-def _analyze_single_lightweight(
-    result: BenchmarkResult,
-    *,
-    pairwise_method: str,
-    robustness_method: str,
-    reference: str,
-    ci: float,
-    n_bootstrap: int,
-    correction: str,
-    statistic: str,
-    simultaneous_ci: bool,
-    rng: np.random.Generator,
-) -> tuple:
-    """Run pairwise + robustness analyses only, skipping rank distribution and seed variance.
-
-    Used inside the MC alignment loop where M lightweight passes are needed.
-    Accepts pre-resolved method strings to avoid redundant auto-detection per draw.
-
-    Returns
-    -------
-    tuple[RobustnessResult, PairwiseMatrix]
-    """
-    if result.has_missing:
-        raise ValueError(
-            "Imputed scores contain NaN values, which are not supported by the "
-            "lightweight analysis path."
-        )
-
-    run_scores = result.get_run_scores()
-    labels = result.template_labels
-
-    pairwise = all_pairwise(
-        run_scores, labels,
-        method=pairwise_method, ci=ci, n_bootstrap=n_bootstrap,
-        correction=correction, rng=rng, statistic=statistic,
-        simultaneous_ci=simultaneous_ci, omnibus=False,
-        multi_ci=False,
-    )
-    robustness = robustness_metrics(
-        run_scores, labels,
-        n_bootstrap=n_bootstrap,
-        rng=rng,
-        alpha=1.0 - ci,
-        statistic=statistic,
-        marginal_method=robustness_method,
-        multi_ci=False,
-    )
-    return robustness, pairwise
 
 
 def _analyze_multi_model(

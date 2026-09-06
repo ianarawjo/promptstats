@@ -29,7 +29,6 @@ SOFTWARE.
 import numpy as np
 import scipy.stats as stats
 import pandas as pd
-import matplotlib.pyplot as plt
 
 # for bivariate normal CDF
 from scipy.special import erf
@@ -417,82 +416,3 @@ def binorm_cdf(x1, x2, mu1, mu2, sigma1, sigma2, rho):
     result[case5_indices] = case5(p[case5_indices], q[case5_indices], rho[case5_indices], a[case5_indices], b[case5_indices])
 
     return result
-
-
-################################################################
-## Plotting
-def plot_intervals(eval_df, intervals_df, filename = None, title = "Model Accuracy"):
-    assert isinstance(eval_df, pd.DataFrame)
-    assert isinstance(intervals_df, pd.DataFrame)
-    assert isinstance(title, str)
-
-    intervals, model_names = extract_data_from_df(intervals_df)
-    eval_data, _ = extract_data_from_df(eval_df)
-
-    means = eval_data.mean(-1)
-
-    fig, ax = plt.subplots()
-
-    # plot means and error bars separately as they might not line up (e.g. mean is outside the error bars)
-    ax.bar(model_names, means)
-
-    positions = np.arange(len(model_names))
-    for i, llm in enumerate(model_names):
-        ax.bxp([{
-                'med': means[i],
-                'q1': means[i],
-                'q3': means[i],
-                'whislo': intervals[i,0],
-                'whishi': intervals[i,1],
-                'caps': intervals[i],
-                'fliers': [],
-                'mean': []
-            }], 
-            positions=[positions[i]], 
-            widths=1, 
-            showfliers=False, 
-            boxprops=dict(color='#444'), 
-    )
-    ax.set_ylabel('Accuracy')
-    ax.set_title(title)
-    ax.set_xticks(positions)
-    ax.set_xticklabels(model_names, rotation=45, ha='right')
-    plt.tight_layout()
-    if filename is not None:
-        plt.savefig(filename)
-        plt.close(fig)
-    else:
-        plt.show()
-
-def plot_comparisons(comparison_df, filename = None, title = "Model Comparison"):
-    assert isinstance(comparison_df, pd.DataFrame)
-    assert isinstance(title, str)
-
-    comparison_matrix, model_names = extract_data_from_df(comparison_df)
-
-    fig, ax = plt.subplots()
-    
-    # transpose to have Model A on y-axis and Model B on x-axis (because data is in Model B cols x Model A rows)
-    cax = ax.matshow(comparison_matrix.T, cmap='RdYlGn') 
-
-    # add colorbar with title
-    cbar = fig.colorbar(cax)
-    cbar.set_label('P(Model A > Model B)')
-
-    # set ticks and labels with model names
-    ax.xaxis.set_ticks_position('bottom')
-    ax.set_xticks(range(len(model_names)))
-    ax.set_yticks(range(len(model_names)))
-    ax.set_xticklabels(model_names, rotation=45, ha='right')
-    ax.set_yticklabels(model_names)
-
-    ax.set_title(title)
-    ax.set_xlabel('Model B')
-    ax.set_ylabel('Model A')
-
-    plt.tight_layout()
-    if filename is not None:
-        plt.savefig(filename)
-        plt.close(fig)
-    else:
-        plt.show()

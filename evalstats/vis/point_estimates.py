@@ -38,10 +38,8 @@ _PALETTE = {
 
 def plot_point_estimates(
     result: Union[BenchmarkResult, RobustnessResult],
-    reference: str = "grand_mean",
     n_bootstrap: int = 10_000,
     ci: float = 0.95,
-    spread_percentiles: tuple[float, float] = (10, 90),
     sort_by: str = "mean",
     figsize: Optional[tuple[float, float]] = None,
     title: Optional[str] = None,
@@ -54,14 +52,10 @@ def plot_point_estimates(
     result : BenchmarkResult or RobustnessResult
         Either raw benchmark data (computed internally) or a pre-computed
         robustness result.
-    reference : str
-        Retained for backward compatibility. Ignored in robustness-first mode.
     n_bootstrap : int
         Bootstrap iterations used when computing robustness from raw data.
     ci : float
         Confidence level used when computing robustness from raw data.
-    spread_percentiles : tuple[float, float]
-        Retained for backward compatibility. Ignored in robustness-first mode.
     sort_by : str
         Sort order: 'mean' (descending), 'label' (alphabetical),
         or 'ci_width' (ascending).
@@ -77,7 +71,8 @@ def plot_point_estimates(
     matplotlib.figure.Figure
     """
     # Compute robustness if given raw BenchmarkResult.
-    if isinstance(result, BenchmarkResult):
+    computed_here = isinstance(result, BenchmarkResult)
+    if computed_here:
         scores = result.get_2d_scores()
         rob = robustness_metrics(
             scores, result.template_labels,
@@ -221,7 +216,11 @@ def plot_point_estimates(
             color=_PALETTE["ci_band"],
             linewidth=ci_lw,
             solid_capstyle="round",
-            label=f"{int(ci * 100)}% marginal CI on mean (n={n_bootstrap:,})",
+            label=(
+                f"{int(ci * 100)}% marginal CI on mean (n={n_bootstrap:,})"
+                if computed_here
+                else "Marginal CI on mean"
+            ),
         ),
         Line2D(
             [0], [0],

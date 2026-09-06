@@ -10,17 +10,16 @@ Provides the new spec API on top of the existing statistical engine:
 from __future__ import annotations
 
 import warnings
-from typing import Any, Dict, List, Literal, Optional, Union
+from typing import Any, Literal, Optional, Union
 
 import numpy as np
 import pandas as pd
 from scipy.stats import norm as _scipy_norm
-from scipy.stats import t as _scipy_t
 
-from evalstats.loader import EvalResults, EvalLoadError, load_from, _scores_dict_to_df, _is_nested_scores_dict
+from evalstats.loader import EvalResults, EvalLoadError, load_from, _scores_dict_to_df
 from evalstats.io import from_dataframe
 from evalstats.config import get_alpha_ci, GRADIENT_CI_ALPHAS, MIN_SAMPLE_FLOOR
-from evalstats.core.router import analyze, analyze_factorial, _analyze_single_lightweight
+from evalstats.core.router import analyze, analyze_factorial
 from evalstats.core.bundles import AnalysisBundle, MultiModelBundle, AnalysisResult
 from evalstats.core.design import detect_paired
 from evalstats.core.unpaired import compare_unpaired, GroupComparisonResult
@@ -756,7 +755,7 @@ class ComparisonResult:
                 .reset_index()
                 .rename(columns={score_col: "score_std"})
             )
-        except Exception:
+        except (TypeError, KeyError):
             return pd.DataFrame()
 
         agg = agg.sort_values("score_std", ascending=False)
@@ -767,7 +766,13 @@ class ComparisonResult:
         if top_n is not None:
             agg = agg.head(top_n)
 
-        return agg.reset_index(drop=True)
+        # Join back the raw per-entity rows for the selected items, so callers
+        # get the actual scores that produced each disagreement, not just the
+        # std -- ordered by descending disagreement, item as the tiebreaker.
+        out_cols = key_cols + [score_col]
+        out = df[out_cols].merge(agg[[item_col, "score_std"]], on=item_col)
+        out = out.sort_values(["score_std", item_col], ascending=[False, True])
+        return out.reset_index(drop=True)
 
     # ── internal helpers ─────────────────────────────────────────────────────
 
@@ -920,6 +925,745 @@ def _bridge_to_io(
 
     keep_cols = keep_cols & set(df_io.columns)
     return df_io[list(keep_cols)]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# compare()
+# ─────────────────────────────────────────────────────────────────────────────
+
+def compare(
+    evaldata: EvalResults,
+    *,
+    factors: Union[str, list[str]],
+    metric: Optional[str] = None,
+    baseline: Optional[str] = None,
+    block: Union[str, list[str], Literal["auto"]] = "auto",
+    slices=None,         # deferred
+    secondary_metric: Optional[dict[str, Literal["min", "max"]]] = None,
+    alignment=None,
+    n_mc: int = 200,
+    min_meaningful_diff: Optional[float] = None,
+    alpha: Optional[float] = None,
+    p_values: Optional[bool] = None,
+    omnibus: Optional[bool] = None,
+    pairwise_test: Literal["auto", "bootstrap", "wilcoxon", "nemenyi"] = "auto",
+    show_rank_probabilities: bool = False,
+    design: Literal["auto", "paired", "unpaired"] = "auto",
+    **kwargs: Any,
+) -> Union[ComparisonResult, GroupComparisonResult]:
+    """Compare entities along one or more factor axes.
+
+    Parameters
+    ----------
+    evaldata : EvalResults
+        Evaluation data from :func:`load_from`.
+    factors : str or list[str]
+        What to compare. Common values:
+
+        * ``"model"`` — compare models
+        * ``"prompt"`` — compare prompt templates
+        * ``["model", "prompt"]`` — factorial design (uses LMM backend)
+        * Any other column name — compares levels of that column
+
+    metric : str, optional
+        Metric column to analyze. Defaults to the first metric column
+        detected by ``load_from``.
+    baseline : str, optional
+        Name of the baseline entity to compare all others against.
+        When ``None``, uses grand-mean reference.
+    block : str or "auto"
+        Blocking column — typically ``"item"`` or ``"input"``. ``"auto"``
+        (default) uses the item column detected by ``load_from``. Only a
+        single blocking column is supported; passing a list uses its first
+        element and warns.
+    secondary_metric : dict[str, {"min", "max"}], optional
+        Run an uncertainty-aware Pareto-front analysis against a second
+        metric, e.g. ``secondary_metric={"latency_ms": "min"}`` to find the
+        accuracy/latency frontier (``"min"`` for a cost-like metric where
+        lower is better, ``"max"`` for a benefit-like one). Currently
+        supports exactly one secondary metric and a single-factor result
+        (not yet supported for multi-model/factorial comparisons or seeded
+        R>=3 benchmarks). On the paired path (default), also requires a
+        complete design (every entity scored on every item for the
+        secondary metric too) and resamples both metrics *jointly* via a
+        shared per-item bootstrap draw (not two independent marginal
+        bootstraps) so correlation between them (e.g. harder items being
+        both slower and less accurate) is preserved rather than dropped —
+        a marginally-better point estimate on both axes isn't reported as
+        a confident "dominates" call when the data can't actually support
+        it. On the unpaired path (``design="unpaired"``), the same idea
+        applies at row granularity instead — see ``design=``'s docstring
+        for exactly how. See :attr:`ComparisonResult.pareto_status` /
+        :attr:`ComparisonResult.pareto_frontier_probability` (also exposed
+        identically on :class:`~evalstats.core.unpaired.GroupComparisonResult`
+        for the unpaired path).
+    alignment : dict[str, AlignmentResult], optional
+        Apply PPI (prediction-powered inference) correction for LLM-judge
+        measurement error, using a sparse subset of human labels. Pass
+        ``{metric: judge_alignment(...)}`` where ``metric`` matches the
+        metric column being compared. Requires a single-factor, single-model
+        (non-factorial) comparison. See :func:`~evalstats.alignment.judge_alignment`.
+    n_mc : int
+        Bootstrap resample count used by the PPI-correction path when
+        ``alignment=`` is set (floored at 1000 internally). Has no effect
+        otherwise, and no effect on the unpaired path (use ``n_bootstrap=``
+        there instead).
+    min_meaningful_diff : float, optional
+        A difference of practical interest, in the metric's own units.
+        When set, the printed summary adds a rough "how many more inputs
+        would you need" estimate based on the observed variance.
+    alpha : float, optional
+        Significance level / CI width: ``alpha=0.05`` → 95 % CIs.
+        When ``None`` (default), uses the global value set by
+        :func:`~evalstats.config.set_alpha_ci` (default 0.05).
+    p_values : bool
+        When ``True``, print a p-value column in the pairwise comparisons
+        table (default: bootstrap p-values). Combine with ``omnibus=True``
+        to switch this to Wilcoxon signed-rank (the standard Friedman
+        post-hoc), or set ``pairwise_test=`` explicitly to pick one
+        directly. When ``alignment=`` is also passed, bootstrap and
+        Wilcoxon p-values are both PPI-corrected.
+    omnibus : bool
+        When ``True``, run and print the Friedman omnibus test ("are ANY
+        of the compared entities different?") above the pairwise table.
+        Also PPI-corrected when ``alignment=`` is passed.
+    pairwise_test : {"auto", "bootstrap", "wilcoxon", "nemenyi"}
+        Which p-value to show in the pairwise table. ``"auto"`` (default)
+        always picks Wilcoxon signed-ranks, for any number of entities --
+        the standard workflow fig:fwer-decision-tree assumes throughout:
+        Friedman omnibus first when requested (``omnibus=True``), then
+        Wilcoxon for every pairwise comparison, then FWER-corrected as
+        post-hoc (see ``correction=`` on the underlying analysis engine).
+        Pass ``pairwise_test="bootstrap"`` explicitly for the CI-construction
+        method's own p-value instead. ``"nemenyi"`` requires ``omnibus=True``
+        and is not supported together with
+        ``alignment=`` (no validated PPI-corrected Nemenyi exists yet).
+    show_rank_probabilities : bool
+        When ``True``, include the bootstrap "Rank Probabilities" block
+        (P(Best)/E[Rank] per entity) in ``.summary()`` output and the
+        ``p_best`` field in ``.to_dict()``/``.to_frame()``. Off by default:
+        a P(Best) figure reads as a confident, near-authoritative verdict
+        even when entities are statistically indistinguishable once you
+        look at the CIs sitting next to it, so this output is opt-in rather
+        than opt-out. Ranking is still computed either way; this only
+        controls whether it's surfaced. Can be overridden per-call via the
+        same-named argument on ``.summary()``/``.to_dict()``/``.to_frame()``.
+    design : {"auto", "paired", "unpaired"}
+        Experimental design for single-factor comparisons (``factors`` names
+        one column, and no factorial/multi-model second axis applies).
+        ``"auto"`` (default) checks whether items are shared across the
+        compared groups: when they are (the normal within-subjects case —
+        every entity scored on the same items), analysis proceeds exactly
+        as before. When items are disjoint per group (a between-subjects
+        design — e.g. independent user cohorts, one per condition), a
+        ``ValueError`` is raised rather than silently forcing a paired
+        analysis onto unpaired data, since ``compare()``'s default engine
+        assumes paired items. Pass ``design="unpaired"`` to explicitly run
+        the between-subjects path instead: a per-group descriptive summary
+        plus all-pairs comparisons (Kruskal-Wallis omnibus / Mann-Whitney U
+        post-hoc for continuous, likert, and grade metrics; one-way ANOVA /
+        Welch's t-test for binary metrics), Bonferroni-corrected CIs and
+        Holm-corrected p-values, PPI-corrected when ``alignment=`` is
+        passed. Between-subjects data commonly has no natural item/reviewer
+        id at all (e.g. just group + rating) — ``load_from()`` still
+        requires *some* item column to build ``evaldata`` in the first
+        place, so add a throwaway one first if needed, e.g.
+        ``df["item"] = range(len(df))``, before calling ``load_from()``.
+        Returns a :class:`~evalstats.core.unpaired.GroupComparisonResult`
+        instead of :class:`ComparisonResult` — see its ``.summary()``,
+        ``.to_dict()``, ``.to_frame()``, ``.groups_to_frame()``. Pass
+        ``design="paired"`` to force the existing paired analysis even on
+        data that looks between-subjects (matches pre-``design=`` behavior).
+        Not supported for factorial (2+ factor) comparisons; for
+        ``method="lmm"``/``"factorial_lmm"``, which already tolerate
+        unbalanced/disjoint designs natively via random effects; for any
+        other explicit ``method=``/``backend=`` override (the between-
+        subjects engine's CI construction isn't a pluggable-method
+        surface); or together with multi-run (seeded) data.
+        ``secondary_metric=`` (Pareto-front analysis) IS supported here —
+        unlike the paired path's shared-item-index joint bootstrap (every
+        entity resampled at the same item positions), the between-subjects
+        version resamples each group's own rows independently (there's no
+        shared item pool across disjoint groups to preserve correlation
+        through), still preserving each row's own primary/secondary
+        pairing. Populates
+        :attr:`~evalstats.core.unpaired.GroupComparisonResult.pareto_status`/
+        ``pareto_frontier_probability`` exactly like the paired path's own
+        attributes. ``score_range=`` is honored (passed through to the
+        per-group marginal CI's auto-method resolution, same as the paired
+        path). ``n_mc=`` has no effect — the equivalent knob is
+        ``n_bootstrap=``. ``p_values=`` and ``omnibus=`` are honored, but
+        with unpaired-specific *defaults of True* (not ``compare()``'s own
+        ``False``) — leave them unset to get this path's normal, always-
+        shown report; pass ``p_values=False`` to hide the pairwise table's
+        p-value column (the underlying values stay in ``.to_dict()``/
+        ``.to_frame()``), or ``omnibus=False`` to skip running the omnibus
+        test entirely at 3+ groups. ``baseline=``, ``pairwise_test=``, and
+        ``show_rank_probabilities=`` still have no effect on this path —
+        it always reports all-pairs comparisons (no baseline-relative
+        view) and has no rank-probability view.
+    **kwargs
+        Two uses:
+
+        1. **Column filters** — keyword matching a column name in the data
+           filters rows before analysis.
+           E.g. ``compare(evaldata, factors="model", split="test")``
+           keeps only rows where ``split == "test"``.
+           Pass a list to select multiple values:
+           ``model=["gpt-4o", "claude-3-5-sonnet"]``.
+
+        2. **Analysis engine overrides** — any other keyword argument
+           accepted by :func:`~evalstats.core.router.analyze` (e.g.
+           ``method="bca"``, ``n_bootstrap=5000``, ``score_range=(1, 5)``
+           for a Likert-scale metric — see ``analyze()``'s ``score_range``
+           parameter for when this matters).
+
+    Returns
+    -------
+    ComparisonResult
+
+    Examples
+    --------
+    >>> import evalstats as es
+    >>> evaldata = es.load_from(df, col_map={"llm": "model", "q_id": "item"})
+    >>> result = es.compare(evaldata, factors="model")
+    >>> result.summary()
+
+    >>> result = es.compare(evaldata, factors="prompt", method="bca")
+    >>> result.to_frame()["entities"]
+    """
+    if slices is not None:
+        warnings.warn("slices= is not yet implemented and will be ignored.", UserWarning, stacklevel=2)
+    # ── resolve alpha (explicit > global default) ─────────────────────────────
+    if alpha is None:
+        alpha = get_alpha_ci()
+
+    # Preserve the original factor names as provided by the caller; internal
+    # dispatch may remap them to standard column names ("model", "prompt") so
+    # that load_from() can detect uniqueness constraints correctly.
+    _user_factors = factors
+
+    # ── coerce non-EvalResults input types ────────────────────────────────────
+    if isinstance(evaldata, list):
+        # list[dict] in long format — detect custom factor columns and remap
+        # them to standard names so load_from() includes them in the uniqueness
+        # key (otherwise the duplicate check rejects multi-factor long tables).
+        _f_list = [factors] if isinstance(factors, str) else list(factors)
+        _tmp_df = pd.DataFrame(evaldata) if evaldata else pd.DataFrame()
+        _cmap = _custom_factor_col_map(_f_list, _tmp_df)
+        if _cmap:
+            evaldata = load_from(evaldata, col_map=_cmap)
+            _f_list = [_cmap.get(f, f) for f in _f_list]
+            factors = _f_list[0] if len(_f_list) == 1 else _f_list
+        else:
+            evaldata = load_from(evaldata)
+    elif isinstance(evaldata, dict):
+        # dict-of-arrays (flat or nested) — convert via scores-dict helper,
+        # then ensure factor column names resolve to standard slot names.
+        # _scores_dict_to_df normalizes nested-dict keys to "model"/"prompt"
+        # regardless of factors; flat-dict custom names stay as-is and need
+        # renaming so load_from() includes them in the uniqueness key.
+        _f_list = [factors] if isinstance(factors, str) else list(factors)
+        df_from_dict = _scores_dict_to_df(evaldata, factors=factors)
+        _f_actual: list[str] = []
+        for _i, _f in enumerate(_f_list):
+            _std = _FACTOR_STD_SLOTS[_i] if _i < len(_FACTOR_STD_SLOTS) else _f
+            if _f in df_from_dict.columns and _f not in _STANDARD_FACTOR_NAMES:
+                # Flat-dict custom column — rename to standard slot in place
+                df_from_dict = df_from_dict.rename(columns={_f: _std})
+                _f_actual.append(_std)
+            elif _std in df_from_dict.columns:
+                # Nested-dict already produced the standard slot name
+                _f_actual.append(_std)
+            else:
+                _f_actual.append(_f)
+        factors = _f_actual[0] if len(_f_actual) == 1 else _f_actual
+        evaldata = load_from(df_from_dict)
+    elif not isinstance(evaldata, EvalResults):
+        raise TypeError(
+            f"compare() expects EvalResults, list[dict], or dict-of-arrays; "
+            f"got {type(evaldata).__name__}. "
+            "Use load_from() to construct an EvalResults object from a DataFrame."
+        )
+
+    # ── get raw DataFrame and column roles ────────────────────────────────────
+    df = evaldata._df.copy()
+    col = evaldata._col
+    metric_cols = evaldata._metric_cols
+
+    # Resolve metric column
+    if metric is None:
+        metric_col = metric_cols[0]
+    else:
+        if metric not in df.columns:
+            raise EvalLoadError(
+                f"metric column '{metric}' not found in data. "
+                f"Available metric columns: {metric_cols}"
+            )
+        metric_col = metric
+
+    # Resolve item (blocking) column
+    if block == "auto":
+        item_col = col.get("item")
+    elif isinstance(block, str):
+        item_col = block
+    else:
+        if len(block) > 1:
+            warnings.warn(
+                f"block={block!r} has more than one column; only a single "
+                "blocking column is supported, so only the first "
+                f"({block[0]!r}) is used.",
+                UserWarning,
+                stacklevel=2,
+            )
+        item_col = block[0] if block else col.get("item")
+
+    if not item_col or item_col not in df.columns:
+        raise EvalLoadError(
+            "Could not determine the item/blocking column. "
+            "Specify block='your_item_column' or ensure your data has an 'item' column."
+        )
+
+    run_col = col.get("run")
+
+    # ── fold the named p-value engine params back into kwargs so the existing
+    # column-filter/engine-kwarg split below (and the analyze() calls it
+    # feeds) doesn't need to change ──────────────────────────────────────────
+    kwargs = dict(kwargs)
+    kwargs["p_values"] = p_values
+    kwargs["omnibus"] = omnibus
+    kwargs["pairwise_test"] = pairwise_test
+
+    # ── split kwargs into column filters vs. engine kwargs ────────────────────
+    df, engine_kwargs = _apply_kwarg_filters(df, kwargs, _ANALYZE_PARAMS)
+
+    # ── set CI level from alpha ───────────────────────────────────────────────
+    ci_level = 1.0 - alpha
+
+    # ── dispatch by factor type ───────────────────────────────────────────────
+    factors_list = [factors] if isinstance(factors, str) else list(factors)
+
+    # Detect canonical mappings
+    model_col  = col.get("model")
+    prompt_col = col.get("prompt")
+
+    is_model_comparison  = (len(factors_list) == 1 and
+                             factors_list[0] in {"model"} and model_col and model_col in df)
+    is_prompt_comparison = (len(factors_list) == 1 and
+                             factors_list[0] in {"prompt", "template"} and prompt_col and prompt_col in df)
+    is_canonical_col = (len(factors_list) == 1 and factors_list[0] in df.columns and
+                        not is_model_comparison and not is_prompt_comparison)
+    is_factorial = len(factors_list) >= 2
+
+    # Reject NaN/missing values in factor column(s) early with a clear,
+    # correctly-attributed error -- otherwise a NaN factor value silently
+    # becomes its own group and only surfaces later as a confusing "scores
+    # contain N NaN cells" error that blames the metric column instead.
+    for _f in factors_list:
+        _resolved_factor_col = (
+            model_col if (_f == "model" and model_col and model_col in df.columns) else
+            prompt_col if (_f in {"prompt", "template"} and prompt_col and prompt_col in df.columns) else
+            _f if _f in df.columns else None
+        )
+        if _resolved_factor_col is not None:
+            _n_na_factor = int(df[_resolved_factor_col].isna().sum())
+            if _n_na_factor > 0:
+                raise ValueError(
+                    f"factor column {_resolved_factor_col!r} contains {_n_na_factor} "
+                    "missing (NaN) value(s). Every row must have a value for the "
+                    "factor being compared -- drop or fill these rows before "
+                    "calling compare()."
+                )
+
+    # Also handle the case where factor is neither "model" nor "prompt" but names
+    # a canonical-alias column directly (e.g. user mapped "llm" → "model", then
+    # passes factors="model" which now IS model_col).
+    if not is_model_comparison and not is_prompt_comparison and not is_factorial:
+        factor_col_name = factors_list[0]
+        if factor_col_name in df.columns:
+            is_canonical_col = True
+
+    # ── enforce the documented minimum sample floor ───────────────────────────
+    # Below MIN_SAMPLE_FLOOR items per compared entity, results are too noisy
+    # to be meaningful -- refuse rather than silently print stats built on too
+    # little data. Uses the per-entity item count when a single clear factor
+    # column is resolved (the common case); falls back to the overall unique
+    # item count for factorial comparisons, where "N" isn't a single number.
+    _floor_factor_col = (
+        model_col if is_model_comparison else
+        prompt_col if is_prompt_comparison else
+        factors_list[0] if (is_canonical_col and factors_list[0] in df.columns) else
+        None
+    )
+    if _floor_factor_col is not None:
+        _min_n = int(df.groupby(_floor_factor_col)[item_col].nunique().min())
+    else:
+        _min_n = int(df[item_col].nunique())
+    if _min_n < MIN_SAMPLE_FLOOR:
+        raise ValueError(
+            f"Only {_min_n} item(s) per compared entity -- evalstats requires at "
+            f"least {MIN_SAMPLE_FLOOR} to report statistics (results below this "
+            "floor are too noisy to be meaningful). Expand your eval set before "
+            "calling compare()."
+        )
+
+    # ── design detection / routing (paired vs. unpaired) ─────────────────────
+    # Scoped to "pure" single-factor cases only -- i.e. whichever of paths A/B/C
+    # would run below, and only when that path's own implicit multi-model second
+    # axis (block_col) is absent, since the multi-model/factorial machinery is
+    # out of scope here. Factorial calls and method="lmm"/"factorial_lmm" are
+    # exempt entirely: LMM already tolerates incomplete/disjoint designs via
+    # random effects, and no currently-passing non-LMM call can be affected by
+    # this new check, because the bootstrap path already hard-crashes on
+    # genuinely unpaired data (has_missing) -- so paired-path behavior for every
+    # existing call is unchanged.
+    _design_backend = engine_kwargs.get("method") or engine_kwargs.get("backend")
+    _design_exempt = is_factorial or _design_backend in {"lmm", "factorial_lmm"}
+
+    if _design_exempt:
+        if design == "unpaired":
+            raise ValueError(
+                'design="unpaired" is not supported for factorial (2+ factor) '
+                'comparisons or for method="lmm"/"factorial_lmm", which already '
+                "handle unbalanced/disjoint designs natively via random effects."
+            )
+    else:
+        if is_model_comparison:
+            _design_factor_col = model_col
+            _design_is_pure_single_factor = not (prompt_col and prompt_col in df.columns)
+        elif is_prompt_comparison:
+            _design_factor_col = prompt_col
+            _design_is_pure_single_factor = not (model_col and model_col in df.columns)
+        elif is_canonical_col or (not is_factorial and factors_list[0] in df.columns):
+            _design_factor_col = factors_list[0]
+            _design_is_pure_single_factor = True
+        else:
+            _design_factor_col = None
+            _design_is_pure_single_factor = False
+
+        if _design_is_pure_single_factor and _design_factor_col:
+            if design == "unpaired" and run_col and run_col in df.columns and df[run_col].nunique() > 1:
+                raise ValueError(
+                    f'design="unpaired" does not yet support multi-run (seeded) data '
+                    f"-- column {run_col!r} has more than one run per item. Treating "
+                    "each run as its own row would silently inflate the effective "
+                    "sample size and break the independence assumption the between-"
+                    "subjects tests rely on (same scoping precedent as PPI alignment's "
+                    "own seeded-benchmark refusal). Aggregate runs to a single score "
+                    f"per item first, e.g. df.groupby([{_design_factor_col!r}, "
+                    f"{item_col!r}])[{metric_col!r}].mean().reset_index()."
+                )
+            if design == "unpaired" and _design_backend not in (None, "auto"):
+                raise ValueError(
+                    f'method={_design_backend!r} is not supported together with '
+                    'design="unpaired" -- the between-subjects engine\'s CI '
+                    "construction (Bonferroni/Holm pairwise, Kruskal-Wallis/ANOVA "
+                    "omnibus) isn't a pluggable-method surface the way the paired "
+                    'path is. Drop method= for this comparison. score_range= is '
+                    "still honored."
+                )
+            if design == "unpaired":
+                # Unlike the paired path, this narrower report defaults both
+                # to True (an unpaired-specific default, not compare()'s own
+                # False) -- unset (None, meaning the caller didn't pass
+                # either) preserves the always-shown behavior this path was
+                # built and battle-tested with; an explicit True/False is
+                # honored as a real suppress/show toggle.
+                _up_p_values = True if engine_kwargs.get("p_values") is None else bool(engine_kwargs.get("p_values"))
+                _up_omnibus = True if engine_kwargs.get("omnibus") is None else bool(engine_kwargs.get("omnibus"))
+                return compare_unpaired(
+                    df, factor_col=_design_factor_col, metric_col=metric_col,
+                    item_col=item_col, alignment=alignment, alpha=alpha,
+                    n_boot=engine_kwargs.get("n_bootstrap", 2000),
+                    rng=engine_kwargs.get("rng"),
+                    score_range=engine_kwargs.get("score_range"),
+                    p_values=_up_p_values, omnibus=_up_omnibus,
+                    secondary_metric=secondary_metric,
+                )
+            if design == "auto" and not detect_paired(df, _design_factor_col, item_col):
+                raise ValueError(
+                    f"Data for factor {_design_factor_col!r} looks between-subjects "
+                    "(items are not shared across the compared groups), but "
+                    "compare()'s default analysis assumes within-subjects (paired) "
+                    'data. Pass design="unpaired" to run the between-subjects '
+                    'comparison instead, or design="paired" to force the existing '
+                    "paired analysis anyway."
+                )
+        elif design == "unpaired":
+            raise ValueError(
+                'design="unpaired" is not supported for this comparison (it '
+                "implies a multi-model/multi-template second axis, which is out "
+                "of scope for the between-subjects path)."
+            )
+
+    # ── path A: model comparison ──────────────────────────────────────────────
+    if is_model_comparison:
+        factor_col_name = model_col
+        block_col = prompt_col  # prompts become the template axis if present
+
+        if block_col and block_col in df.columns:
+            # Multi-model path: map model→"model" axis and prompt→"template" axis.
+            # This keeps labels natural: MultiModelBundle.model_level compares models,
+            # template_level compares prompts, per_model shows per-model prompt analysis.
+            df_multi = df[[factor_col_name, block_col, item_col, metric_col]
+                          + ([run_col] if run_col and run_col in df.columns else [])].copy()
+            rename_multi = {
+                factor_col_name: "model",     # actual models → "model" axis
+                block_col: "template",        # prompts → "template" axis
+                item_col: "input",
+                metric_col: "score",
+            }
+            if run_col and run_col in df.columns:
+                rename_multi[run_col] = "run"
+            df_multi = df_multi.rename(columns={k: v for k, v in rename_multi.items() if k != v})
+            bench = from_dataframe(df_multi, format="long", strict_complete_design=False)
+        else:
+            # No prompt col — single-model BenchmarkResult with model as template axis
+            df_io_keep = df[[factor_col_name, item_col, metric_col]
+                            + ([run_col] if run_col and run_col in df.columns else [])].copy()
+            rename_io = {factor_col_name: "template", item_col: "input", metric_col: "score"}
+            if run_col and run_col in df.columns:
+                rename_io[run_col] = "run"
+            df_io_keep = df_io_keep.rename(columns={k: v for k, v in rename_io.items() if k != v})
+            bench = from_dataframe(df_io_keep, format="long", strict_complete_design=False)
+
+        reference = baseline if baseline else "grand_mean"
+        analysis = analyze(bench, ci=ci_level, reference=reference, **engine_kwargs)
+
+        # model→"model" axis means model_level compares models (what the user requested).
+        # When bench is a BenchmarkResult (no prompts), the analysis is an AnalysisBundle
+        # and _mmb_view is irrelevant.
+        cr = ComparisonResult(
+            analysis,
+            factors=_user_factors,
+            metric=metric_col,
+            baseline=baseline,
+            alpha=alpha,
+            filtered_df=df,
+            _mmb_view="model_level",
+            min_meaningful_diff=min_meaningful_diff,
+            show_rank_probabilities=show_rank_probabilities,
+        )
+        _run_judge_alignment_if_needed(
+            cr, alignment=alignment, metric_col=metric_col, n_mc=n_mc,
+            alpha=alpha, ci_level=ci_level, engine_kwargs=engine_kwargs,
+            df=df, factor_col=factor_col_name, item_col=item_col, run_col=run_col,
+        )
+        _run_pareto_if_needed(
+            cr, secondary_metric=secondary_metric, df=df, factor_col=factor_col_name,
+            item_col=item_col, alpha=alpha, n_boot=max(n_mc, 1000),
+            rng=engine_kwargs.get("rng"),
+        )
+        return cr
+
+    # ── path B: prompt/template comparison ───────────────────────────────────
+    if is_prompt_comparison:
+        factor_col_name = prompt_col
+        block_col = model_col  # if models present, they become block axis
+
+        if block_col and block_col in df.columns:
+            # Multi-model path: prompt as template, model as model.
+            df_multi = df[[block_col, factor_col_name, item_col, metric_col]
+                          + ([run_col] if run_col and run_col in df.columns else [])].copy()
+            rename_multi = {
+                factor_col_name: "template",
+                block_col: "model",
+                item_col: "input",
+                metric_col: "score",
+            }
+            if run_col and run_col in df.columns:
+                rename_multi[run_col] = "run"
+            df_multi = df_multi.rename(columns={k: v for k, v in rename_multi.items() if k != v})
+            bench = from_dataframe(df_multi, format="long", strict_complete_design=False)
+        else:
+            df_io_keep = df[[factor_col_name, item_col, metric_col]
+                            + ([run_col] if run_col and run_col in df.columns else [])].copy()
+            rename_io = {factor_col_name: "template", item_col: "input", metric_col: "score"}
+            if run_col and run_col in df.columns:
+                rename_io[run_col] = "run"
+            df_io_keep = df_io_keep.rename(columns={k: v for k, v in rename_io.items() if k != v})
+            bench = from_dataframe(df_io_keep, format="long", strict_complete_design=False)
+
+        reference = baseline if baseline else "grand_mean"
+        analysis = analyze(bench, ci=ci_level, reference=reference, **engine_kwargs)
+
+        cr = ComparisonResult(
+            analysis,
+            factors=_user_factors,
+            metric=metric_col,
+            baseline=baseline,
+            alpha=alpha,
+            filtered_df=df,
+            _mmb_view="template_level",
+            min_meaningful_diff=min_meaningful_diff,
+            show_rank_probabilities=show_rank_probabilities,
+        )
+        _run_judge_alignment_if_needed(
+            cr, alignment=alignment, metric_col=metric_col, n_mc=n_mc,
+            alpha=alpha, ci_level=ci_level, engine_kwargs=engine_kwargs,
+            df=df, factor_col=factor_col_name, item_col=item_col, run_col=run_col,
+        )
+        _run_pareto_if_needed(
+            cr, secondary_metric=secondary_metric, df=df, factor_col=factor_col_name,
+            item_col=item_col, alpha=alpha, n_boot=max(n_mc, 1000),
+            rng=engine_kwargs.get("rng"),
+        )
+        return cr
+
+    # ── path C: arbitrary single factor column ────────────────────────────────
+    if is_canonical_col or (not is_factorial and factors_list[0] in df.columns):
+        factor_col_name = factors_list[0]
+
+        df_io_keep = df[[factor_col_name, item_col, metric_col]
+                        + ([run_col] if run_col and run_col in df.columns else [])].copy()
+        rename_io = {factor_col_name: "template", item_col: "input", metric_col: "score"}
+        if run_col and run_col in df.columns:
+            rename_io[run_col] = "run"
+        df_io_keep = df_io_keep.rename(columns={k: v for k, v in rename_io.items() if k != v})
+        bench = from_dataframe(df_io_keep, format="long", strict_complete_design=False)
+
+        reference = baseline if baseline else "grand_mean"
+        analysis = analyze(bench, ci=ci_level, reference=reference, **engine_kwargs)
+
+        cr = ComparisonResult(
+            analysis,
+            factors=_user_factors,
+            metric=metric_col,
+            baseline=baseline,
+            alpha=alpha,
+            filtered_df=df,
+            min_meaningful_diff=min_meaningful_diff,
+            show_rank_probabilities=show_rank_probabilities,
+        )
+        _run_judge_alignment_if_needed(
+            cr, alignment=alignment, metric_col=metric_col, n_mc=n_mc,
+            alpha=alpha, ci_level=ci_level, engine_kwargs=engine_kwargs,
+            df=df, factor_col=factor_col_name, item_col=item_col, run_col=run_col,
+        )
+        _run_pareto_if_needed(
+            cr, secondary_metric=secondary_metric, df=df, factor_col=factor_col_name,
+            item_col=item_col, alpha=alpha, n_boot=max(n_mc, 1000),
+            rng=engine_kwargs.get("rng"),
+        )
+        return cr
+
+    # ── path D-pre: canonical 2-factor ["model","prompt"] → multi-model path ──
+    # When the user passes exactly the standard factor names (not custom names
+    # that were remapped), prefer the richer MultiModelBundle path over factorial
+    # LMM — it's simpler, faster, and shows the cross-model ranking output the
+    # user usually wants.  An explicit LMM backend opt-in bypasses this.
+    _user_factors_list = [_user_factors] if isinstance(_user_factors, str) else list(_user_factors)
+    _is_canonical_2factor = (
+        is_factorial
+        and len(_user_factors_list) == 2
+        and all(f in _STANDARD_FACTOR_NAMES for f in _user_factors_list)
+        and model_col and model_col in df.columns
+        and prompt_col and prompt_col in df.columns
+        and engine_kwargs.get("backend") not in {"lmm", "factorial_lmm"}
+    )
+    if _is_canonical_2factor:
+        df_multi = df[
+            [model_col, prompt_col, item_col, metric_col]
+            + ([run_col] if run_col and run_col in df.columns else [])
+        ].copy()
+        rename_multi = {
+            model_col: "model",
+            prompt_col: "template",
+            item_col: "input",
+            metric_col: "score",
+        }
+        if run_col and run_col in df.columns:
+            rename_multi[run_col] = "run"
+        df_multi = df_multi.rename(columns={k: v for k, v in rename_multi.items() if k != v})
+        bench = from_dataframe(df_multi, format="long", strict_complete_design=False)
+        reference = baseline if baseline else "grand_mean"
+        analysis = analyze(bench, ci=ci_level, reference=reference, **engine_kwargs)
+        return ComparisonResult(
+            analysis,
+            factors=_user_factors,
+            metric=metric_col,
+            baseline=baseline,
+            alpha=alpha,
+            filtered_df=df,
+            _mmb_view="model_level",
+            min_meaningful_diff=min_meaningful_diff,
+            show_rank_probabilities=show_rank_probabilities,
+        )
+
+    # ── path D: factorial (multiple factors → LMM) ────────────────────────────
+    if is_factorial:
+        # Validate all factor columns exist
+        missing_factors = [f for f in factors_list if f not in df.columns]
+        if missing_factors:
+            raise EvalLoadError(
+                f"Factor column(s) {missing_factors} not found in data. "
+                f"Available columns: {list(df.columns)}"
+            )
+
+        # Rename metric and item cols to what analyze_factorial expects
+        df_fact = df.copy()
+        rename_fact: dict[str, str] = {}
+        if metric_col != "score":
+            rename_fact[metric_col] = "score"
+            df_fact = df_fact.rename(columns=rename_fact)
+            score_col_name = "score"
+        else:
+            score_col_name = "score"
+
+        factorial_kwargs = {
+            k: v for k, v in engine_kwargs.items()
+            if k in {"backend", "ci", "correction", "reference",
+                     "spread_percentiles", "failure_threshold", "n_sim", "rng"}
+        }
+        if "ci" not in factorial_kwargs:
+            factorial_kwargs["ci"] = ci_level
+
+        run_col_fact = run_col if run_col and run_col in df_fact.columns else None
+
+        analysis = analyze_factorial(
+            df_fact,
+            factors=factors_list,
+            random_effect=item_col,
+            score_col=score_col_name,
+            run_col=run_col_fact,
+            **factorial_kwargs,
+        )
+
+        return ComparisonResult(
+            analysis,
+            factors=_user_factors,
+            metric=metric_col,
+            baseline=baseline,
+            alpha=alpha,
+            filtered_df=df,
+            min_meaningful_diff=min_meaningful_diff,
+            show_rank_probabilities=show_rank_probabilities,
+        )
+
+    raise EvalLoadError(
+        f"Could not dispatch compare() for factors={factors!r}. "
+        f"Factor column(s) not found in data. Available columns: {list(df.columns)}"
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Thin wrappers
+# ─────────────────────────────────────────────────────────────────────────────
+
+def compare_models(evaldata: EvalResults, **kwargs) -> ComparisonResult:
+    """Compare models — equivalent to ``compare(evaldata, factors="model", ...)``.
+
+    All keyword arguments are forwarded to :func:`compare`.
+    """
+    return compare(evaldata, factors="model", **kwargs)
+
+
+def compare_prompts(evaldata: EvalResults, **kwargs) -> ComparisonResult:
+    """Compare prompt templates — equivalent to ``compare(evaldata, factors="prompt", ...)``.
+
+    All keyword arguments are forwarded to :func:`compare`.
+    """
+    return compare(evaldata, factors="prompt", **kwargs)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2389,717 +3133,3 @@ def _run_pareto_if_needed(
         "primary_robustness": bundle.robustness,
         "secondary_robustness": secondary_robustness,
     }
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# compare()
-# ─────────────────────────────────────────────────────────────────────────────
-
-def compare(
-    evaldata: EvalResults,
-    *,
-    factors: Union[str, list[str]],
-    metric: Optional[str] = None,
-    baseline: Optional[str] = None,
-    block: Union[str, list[str], Literal["auto"]] = "auto",
-    slices=None,         # deferred
-    secondary_metric: Optional[dict[str, Literal["min", "max"]]] = None,
-    alignment=None,
-    n_mc: int = 200,
-    min_meaningful_diff=None,  # deferred
-    alpha: Optional[float] = None,
-    p_values: Optional[bool] = None,
-    omnibus: Optional[bool] = None,
-    pairwise_test: Literal["auto", "bootstrap", "wilcoxon", "nemenyi"] = "auto",
-    show_rank_probabilities: bool = False,
-    design: Literal["auto", "paired", "unpaired"] = "auto",
-    **kwargs: Any,
-) -> Union[ComparisonResult, GroupComparisonResult]:
-    """Compare entities along one or more factor axes.
-
-    Parameters
-    ----------
-    evaldata : EvalResults
-        Evaluation data from :func:`load_from`.
-    factors : str or list[str]
-        What to compare. Common values:
-
-        * ``"model"`` — compare models
-        * ``"prompt"`` — compare prompt templates
-        * ``["model", "prompt"]`` — factorial design (uses LMM backend)
-        * Any other column name — compares levels of that column
-
-    metric : str, optional
-        Metric column to analyze. Defaults to the first metric column
-        detected by ``load_from``.
-    baseline : str, optional
-        Name of the baseline entity to compare all others against.
-        When ``None``, uses grand-mean reference.
-    block : str, list[str], or "auto"
-        Blocking variable(s) — typically ``"item"`` or ``"input"``.
-        ``"auto"`` (default) uses the item column detected by ``load_from``.
-    secondary_metric : dict[str, {"min", "max"}], optional
-        Run an uncertainty-aware Pareto-front analysis against a second
-        metric, e.g. ``secondary_metric={"latency_ms": "min"}`` to find the
-        accuracy/latency frontier (``"min"`` for a cost-like metric where
-        lower is better, ``"max"`` for a benefit-like one). Currently
-        supports exactly one secondary metric and a single-factor result
-        (not yet supported for multi-model/factorial comparisons or seeded
-        R>=3 benchmarks). On the paired path (default), also requires a
-        complete design (every entity scored on every item for the
-        secondary metric too) and resamples both metrics *jointly* via a
-        shared per-item bootstrap draw (not two independent marginal
-        bootstraps) so correlation between them (e.g. harder items being
-        both slower and less accurate) is preserved rather than dropped —
-        a marginally-better point estimate on both axes isn't reported as
-        a confident "dominates" call when the data can't actually support
-        it. On the unpaired path (``design="unpaired"``), the same idea
-        applies at row granularity instead — see ``design=``'s docstring
-        for exactly how. See :attr:`ComparisonResult.pareto_status` /
-        :attr:`ComparisonResult.pareto_frontier_probability` (also exposed
-        identically on :class:`~evalstats.core.unpaired.GroupComparisonResult`
-        for the unpaired path).
-    alpha : float, optional
-        Significance level / CI width: ``alpha=0.05`` → 95 % CIs.
-        When ``None`` (default), uses the global value set by
-        :func:`~evalstats.config.set_alpha_ci` (default 0.05).
-    p_values : bool
-        When ``True``, print a p-value column in the pairwise comparisons
-        table (default: bootstrap p-values). Combine with ``omnibus=True``
-        to switch this to Wilcoxon signed-rank (the standard Friedman
-        post-hoc), or set ``pairwise_test=`` explicitly to pick one
-        directly. When ``alignment=`` is also passed, bootstrap and
-        Wilcoxon p-values are both PPI-corrected.
-    omnibus : bool
-        When ``True``, run and print the Friedman omnibus test ("are ANY
-        of the compared entities different?") above the pairwise table.
-        Also PPI-corrected when ``alignment=`` is passed.
-    pairwise_test : {"auto", "bootstrap", "wilcoxon", "nemenyi"}
-        Which p-value to show in the pairwise table. ``"auto"`` (default)
-        always picks Wilcoxon signed-ranks, for any number of entities --
-        the standard workflow fig:fwer-decision-tree assumes throughout:
-        Friedman omnibus first when requested (``omnibus=True``), then
-        Wilcoxon for every pairwise comparison, then FWER-corrected as
-        post-hoc (see ``correction=`` on the underlying analysis engine).
-        Pass ``pairwise_test="bootstrap"`` explicitly for the CI-construction
-        method's own p-value instead. ``"nemenyi"`` requires ``omnibus=True``
-        and is not supported together with
-        ``alignment=`` (no validated PPI-corrected Nemenyi exists yet).
-    show_rank_probabilities : bool
-        When ``True``, include the bootstrap "Rank Probabilities" block
-        (P(Best)/E[Rank] per entity) in ``.summary()`` output and the
-        ``p_best`` field in ``.to_dict()``/``.to_frame()``. Off by default:
-        a P(Best) figure reads as a confident, near-authoritative verdict
-        even when entities are statistically indistinguishable once you
-        look at the CIs sitting next to it, so this output is opt-in rather
-        than opt-out. Ranking is still computed either way; this only
-        controls whether it's surfaced. Can be overridden per-call via the
-        same-named argument on ``.summary()``/``.to_dict()``/``.to_frame()``.
-    design : {"auto", "paired", "unpaired"}
-        Experimental design for single-factor comparisons (``factors`` names
-        one column, and no factorial/multi-model second axis applies).
-        ``"auto"`` (default) checks whether items are shared across the
-        compared groups: when they are (the normal within-subjects case —
-        every entity scored on the same items), analysis proceeds exactly
-        as before. When items are disjoint per group (a between-subjects
-        design — e.g. independent user cohorts, one per condition), a
-        ``ValueError`` is raised rather than silently forcing a paired
-        analysis onto unpaired data, since ``compare()``'s default engine
-        assumes paired items. Pass ``design="unpaired"`` to explicitly run
-        the between-subjects path instead: a per-group descriptive summary
-        plus all-pairs comparisons (Kruskal-Wallis omnibus / Mann-Whitney U
-        post-hoc for continuous, likert, and grade metrics; one-way ANOVA /
-        Welch's t-test for binary metrics), Bonferroni-corrected CIs and
-        Holm-corrected p-values, PPI-corrected when ``alignment=`` is
-        passed. Between-subjects data commonly has no natural item/reviewer
-        id at all (e.g. just group + rating) — ``load_from()`` still
-        requires *some* item column to build ``evaldata`` in the first
-        place, so add a throwaway one first if needed, e.g.
-        ``df["item"] = range(len(df))``, before calling ``load_from()``.
-        Returns a :class:`~evalstats.core.unpaired.GroupComparisonResult`
-        instead of :class:`ComparisonResult` — see its ``.summary()``,
-        ``.to_dict()``, ``.to_frame()``, ``.groups_to_frame()``. Pass
-        ``design="paired"`` to force the existing paired analysis even on
-        data that looks between-subjects (matches pre-``design=`` behavior).
-        Not supported for factorial (2+ factor) comparisons; for
-        ``method="lmm"``/``"factorial_lmm"``, which already tolerate
-        unbalanced/disjoint designs natively via random effects; for any
-        other explicit ``method=``/``backend=`` override (the between-
-        subjects engine's CI construction isn't a pluggable-method
-        surface); or together with multi-run (seeded) data.
-        ``secondary_metric=`` (Pareto-front analysis) IS supported here —
-        unlike the paired path's shared-item-index joint bootstrap (every
-        entity resampled at the same item positions), the between-subjects
-        version resamples each group's own rows independently (there's no
-        shared item pool across disjoint groups to preserve correlation
-        through), still preserving each row's own primary/secondary
-        pairing. Populates
-        :attr:`~evalstats.core.unpaired.GroupComparisonResult.pareto_status`/
-        ``pareto_frontier_probability`` exactly like the paired path's own
-        attributes. ``score_range=`` is honored (passed through to the
-        per-group marginal CI's auto-method resolution, same as the paired
-        path). ``n_mc=`` has no effect — the equivalent knob is
-        ``n_bootstrap=``. ``p_values=`` and ``omnibus=`` are honored, but
-        with unpaired-specific *defaults of True* (not ``compare()``'s own
-        ``False``) — leave them unset to get this path's normal, always-
-        shown report; pass ``p_values=False`` to hide the pairwise table's
-        p-value column (the underlying values stay in ``.to_dict()``/
-        ``.to_frame()``), or ``omnibus=False`` to skip running the omnibus
-        test entirely at 3+ groups. ``baseline=``, ``pairwise_test=``, and
-        ``show_rank_probabilities=`` still have no effect on this path —
-        it always reports all-pairs comparisons (no baseline-relative
-        view) and has no rank-probability view.
-    **kwargs
-        Two uses:
-
-        1. **Column filters** — keyword matching a column name in the data
-           filters rows before analysis.
-           E.g. ``compare(evaldata, factors="model", split="test")``
-           keeps only rows where ``split == "test"``.
-           Pass a list to select multiple values:
-           ``model=["gpt-4o", "claude-3-5-sonnet"]``.
-
-        2. **Analysis engine overrides** — any other keyword argument
-           accepted by :func:`~evalstats.core.router.analyze` (e.g.
-           ``method="bca"``, ``n_bootstrap=5000``, ``score_range=(1, 5)``
-           for a Likert-scale metric — see ``analyze()``'s ``score_range``
-           parameter for when this matters).
-
-    Returns
-    -------
-    ComparisonResult
-
-    Examples
-    --------
-    >>> import evalstats as es
-    >>> evaldata = es.load_from(df, col_map={"llm": "model", "q_id": "item"})
-    >>> result = es.compare(evaldata, factors="model")
-    >>> result.summary()
-
-    >>> result = es.compare(evaldata, factors="prompt", method="bca")
-    >>> result.to_frame()["entities"]
-    """
-    if slices is not None:
-        warnings.warn("slices= is not yet implemented and will be ignored.", UserWarning, stacklevel=2)
-    # ── resolve alpha (explicit > global default) ─────────────────────────────
-    if alpha is None:
-        alpha = get_alpha_ci()
-
-    # Preserve the original factor names as provided by the caller; internal
-    # dispatch may remap them to standard column names ("model", "prompt") so
-    # that load_from() can detect uniqueness constraints correctly.
-    _user_factors = factors
-
-    # ── coerce non-EvalResults input types ────────────────────────────────────
-    if isinstance(evaldata, list):
-        # list[dict] in long format — detect custom factor columns and remap
-        # them to standard names so load_from() includes them in the uniqueness
-        # key (otherwise the duplicate check rejects multi-factor long tables).
-        _f_list = [factors] if isinstance(factors, str) else list(factors)
-        _tmp_df = pd.DataFrame(evaldata) if evaldata else pd.DataFrame()
-        _cmap = _custom_factor_col_map(_f_list, _tmp_df)
-        if _cmap:
-            evaldata = load_from(evaldata, col_map=_cmap)
-            _f_list = [_cmap.get(f, f) for f in _f_list]
-            factors = _f_list[0] if len(_f_list) == 1 else _f_list
-        else:
-            evaldata = load_from(evaldata)
-    elif isinstance(evaldata, dict):
-        # dict-of-arrays (flat or nested) — convert via scores-dict helper,
-        # then ensure factor column names resolve to standard slot names.
-        # _scores_dict_to_df normalizes nested-dict keys to "model"/"prompt"
-        # regardless of factors; flat-dict custom names stay as-is and need
-        # renaming so load_from() includes them in the uniqueness key.
-        _f_list = [factors] if isinstance(factors, str) else list(factors)
-        df_from_dict = _scores_dict_to_df(evaldata, factors=factors)
-        _f_actual: list[str] = []
-        for _i, _f in enumerate(_f_list):
-            _std = _FACTOR_STD_SLOTS[_i] if _i < len(_FACTOR_STD_SLOTS) else _f
-            if _f in df_from_dict.columns and _f not in _STANDARD_FACTOR_NAMES:
-                # Flat-dict custom column — rename to standard slot in place
-                df_from_dict = df_from_dict.rename(columns={_f: _std})
-                _f_actual.append(_std)
-            elif _std in df_from_dict.columns:
-                # Nested-dict already produced the standard slot name
-                _f_actual.append(_std)
-            else:
-                _f_actual.append(_f)
-        factors = _f_actual[0] if len(_f_actual) == 1 else _f_actual
-        evaldata = load_from(df_from_dict)
-    elif not isinstance(evaldata, EvalResults):
-        raise TypeError(
-            f"compare() expects EvalResults, list[dict], or dict-of-arrays; "
-            f"got {type(evaldata).__name__}. "
-            "Use load_from() to construct an EvalResults object from a DataFrame."
-        )
-
-    # ── get raw DataFrame and column roles ────────────────────────────────────
-    df = evaldata._df.copy()
-    col = evaldata._col
-    metric_cols = evaldata._metric_cols
-
-    # Resolve metric column
-    if metric is None:
-        metric_col = metric_cols[0]
-    else:
-        if metric not in df.columns:
-            raise EvalLoadError(
-                f"metric column '{metric}' not found in data. "
-                f"Available metric columns: {metric_cols}"
-            )
-        metric_col = metric
-
-    # Resolve item (blocking) column
-    if block == "auto":
-        item_col = col.get("item")
-    elif isinstance(block, str):
-        item_col = block
-    else:
-        item_col = block[0] if block else col.get("item")
-
-    if not item_col or item_col not in df.columns:
-        raise EvalLoadError(
-            "Could not determine the item/blocking column. "
-            "Specify block='your_item_column' or ensure your data has an 'item' column."
-        )
-
-    run_col = col.get("run")
-
-    # ── fold the named p-value engine params back into kwargs so the existing
-    # column-filter/engine-kwarg split below (and the analyze() calls it
-    # feeds) doesn't need to change ──────────────────────────────────────────
-    kwargs = dict(kwargs)
-    kwargs["p_values"] = p_values
-    kwargs["omnibus"] = omnibus
-    kwargs["pairwise_test"] = pairwise_test
-
-    # ── split kwargs into column filters vs. engine kwargs ────────────────────
-    df, engine_kwargs = _apply_kwarg_filters(df, kwargs, _ANALYZE_PARAMS)
-
-    # ── set CI level from alpha ───────────────────────────────────────────────
-    ci_level = 1.0 - alpha
-
-    # ── dispatch by factor type ───────────────────────────────────────────────
-    factors_list = [factors] if isinstance(factors, str) else list(factors)
-
-    # Detect canonical mappings
-    model_col  = col.get("model")
-    prompt_col = col.get("prompt")
-
-    is_model_comparison  = (len(factors_list) == 1 and
-                             factors_list[0] in {"model"} and model_col and model_col in df)
-    is_prompt_comparison = (len(factors_list) == 1 and
-                             factors_list[0] in {"prompt", "template"} and prompt_col and prompt_col in df)
-    is_canonical_col = (len(factors_list) == 1 and factors_list[0] in df.columns and
-                        not is_model_comparison and not is_prompt_comparison)
-    is_factorial = len(factors_list) >= 2
-
-    # Reject NaN/missing values in factor column(s) early with a clear,
-    # correctly-attributed error -- otherwise a NaN factor value silently
-    # becomes its own group and only surfaces later as a confusing "scores
-    # contain N NaN cells" error that blames the metric column instead.
-    for _f in factors_list:
-        _resolved_factor_col = (
-            model_col if (_f == "model" and model_col and model_col in df.columns) else
-            prompt_col if (_f in {"prompt", "template"} and prompt_col and prompt_col in df.columns) else
-            _f if _f in df.columns else None
-        )
-        if _resolved_factor_col is not None:
-            _n_na_factor = int(df[_resolved_factor_col].isna().sum())
-            if _n_na_factor > 0:
-                raise ValueError(
-                    f"factor column {_resolved_factor_col!r} contains {_n_na_factor} "
-                    "missing (NaN) value(s). Every row must have a value for the "
-                    "factor being compared -- drop or fill these rows before "
-                    "calling compare()."
-                )
-
-    # Also handle the case where factor is neither "model" nor "prompt" but names
-    # a canonical-alias column directly (e.g. user mapped "llm" → "model", then
-    # passes factors="model" which now IS model_col).
-    if not is_model_comparison and not is_prompt_comparison and not is_factorial:
-        factor_col_name = factors_list[0]
-        if factor_col_name in df.columns:
-            is_canonical_col = True
-
-    # ── enforce the documented minimum sample floor ───────────────────────────
-    # Below MIN_SAMPLE_FLOOR items per compared entity, results are too noisy
-    # to be meaningful -- refuse rather than silently print stats built on too
-    # little data. Uses the per-entity item count when a single clear factor
-    # column is resolved (the common case); falls back to the overall unique
-    # item count for factorial comparisons, where "N" isn't a single number.
-    _floor_factor_col = (
-        model_col if is_model_comparison else
-        prompt_col if is_prompt_comparison else
-        factors_list[0] if (is_canonical_col and factors_list[0] in df.columns) else
-        None
-    )
-    if _floor_factor_col is not None:
-        _min_n = int(df.groupby(_floor_factor_col)[item_col].nunique().min())
-    else:
-        _min_n = int(df[item_col].nunique())
-    if _min_n < MIN_SAMPLE_FLOOR:
-        raise ValueError(
-            f"Only {_min_n} item(s) per compared entity -- evalstats requires at "
-            f"least {MIN_SAMPLE_FLOOR} to report statistics (results below this "
-            "floor are too noisy to be meaningful). Expand your eval set before "
-            "calling compare()."
-        )
-
-    # ── design detection / routing (paired vs. unpaired) ─────────────────────
-    # Scoped to "pure" single-factor cases only -- i.e. whichever of paths A/B/C
-    # would run below, and only when that path's own implicit multi-model second
-    # axis (block_col) is absent, since the multi-model/factorial machinery is
-    # out of scope here. Factorial calls and method="lmm"/"factorial_lmm" are
-    # exempt entirely: LMM already tolerates incomplete/disjoint designs via
-    # random effects, and no currently-passing non-LMM call can be affected by
-    # this new check, because the bootstrap path already hard-crashes on
-    # genuinely unpaired data (has_missing) -- so paired-path behavior for every
-    # existing call is unchanged.
-    _design_backend = engine_kwargs.get("method") or engine_kwargs.get("backend")
-    _design_exempt = is_factorial or _design_backend in {"lmm", "factorial_lmm"}
-
-    if _design_exempt:
-        if design == "unpaired":
-            raise ValueError(
-                'design="unpaired" is not supported for factorial (2+ factor) '
-                'comparisons or for method="lmm"/"factorial_lmm", which already '
-                "handle unbalanced/disjoint designs natively via random effects."
-            )
-    else:
-        if is_model_comparison:
-            _design_factor_col = model_col
-            _design_is_pure_single_factor = not (prompt_col and prompt_col in df.columns)
-        elif is_prompt_comparison:
-            _design_factor_col = prompt_col
-            _design_is_pure_single_factor = not (model_col and model_col in df.columns)
-        elif is_canonical_col or (not is_factorial and factors_list[0] in df.columns):
-            _design_factor_col = factors_list[0]
-            _design_is_pure_single_factor = True
-        else:
-            _design_factor_col = None
-            _design_is_pure_single_factor = False
-
-        if _design_is_pure_single_factor and _design_factor_col:
-            if design == "unpaired" and run_col and run_col in df.columns and df[run_col].nunique() > 1:
-                raise ValueError(
-                    f'design="unpaired" does not yet support multi-run (seeded) data '
-                    f"-- column {run_col!r} has more than one run per item. Treating "
-                    "each run as its own row would silently inflate the effective "
-                    "sample size and break the independence assumption the between-"
-                    "subjects tests rely on (same scoping precedent as PPI alignment's "
-                    "own seeded-benchmark refusal). Aggregate runs to a single score "
-                    f"per item first, e.g. df.groupby([{_design_factor_col!r}, "
-                    f"{item_col!r}])[{metric_col!r}].mean().reset_index()."
-                )
-            if design == "unpaired" and _design_backend not in (None, "auto"):
-                raise ValueError(
-                    f'method={_design_backend!r} is not supported together with '
-                    'design="unpaired" -- the between-subjects engine\'s CI '
-                    "construction (Bonferroni/Holm pairwise, Kruskal-Wallis/ANOVA "
-                    "omnibus) isn't a pluggable-method surface the way the paired "
-                    'path is. Drop method= for this comparison. score_range= is '
-                    "still honored."
-                )
-            if design == "unpaired":
-                # Unlike the paired path, this narrower report defaults both
-                # to True (an unpaired-specific default, not compare()'s own
-                # False) -- unset (None, meaning the caller didn't pass
-                # either) preserves the always-shown behavior this path was
-                # built and battle-tested with; an explicit True/False is
-                # honored as a real suppress/show toggle.
-                _up_p_values = True if engine_kwargs.get("p_values") is None else bool(engine_kwargs.get("p_values"))
-                _up_omnibus = True if engine_kwargs.get("omnibus") is None else bool(engine_kwargs.get("omnibus"))
-                return compare_unpaired(
-                    df, factor_col=_design_factor_col, metric_col=metric_col,
-                    item_col=item_col, alignment=alignment, alpha=alpha,
-                    n_boot=engine_kwargs.get("n_bootstrap", 2000),
-                    rng=engine_kwargs.get("rng"),
-                    score_range=engine_kwargs.get("score_range"),
-                    p_values=_up_p_values, omnibus=_up_omnibus,
-                    secondary_metric=secondary_metric,
-                )
-            if design == "auto" and not detect_paired(df, _design_factor_col, item_col):
-                raise ValueError(
-                    f"Data for factor {_design_factor_col!r} looks between-subjects "
-                    "(items are not shared across the compared groups), but "
-                    "compare()'s default analysis assumes within-subjects (paired) "
-                    'data. Pass design="unpaired" to run the between-subjects '
-                    'comparison instead, or design="paired" to force the existing '
-                    "paired analysis anyway."
-                )
-        elif design == "unpaired":
-            raise ValueError(
-                'design="unpaired" is not supported for this comparison (it '
-                "implies a multi-model/multi-template second axis, which is out "
-                "of scope for the between-subjects path)."
-            )
-
-    # ── path A: model comparison ──────────────────────────────────────────────
-    if is_model_comparison:
-        factor_col_name = model_col
-        block_col = prompt_col  # prompts become the template axis if present
-
-        if block_col and block_col in df.columns:
-            # Multi-model path: map model→"model" axis and prompt→"template" axis.
-            # This keeps labels natural: MultiModelBundle.model_level compares models,
-            # template_level compares prompts, per_model shows per-model prompt analysis.
-            df_multi = df[[factor_col_name, block_col, item_col, metric_col]
-                          + ([run_col] if run_col and run_col in df.columns else [])].copy()
-            rename_multi = {
-                factor_col_name: "model",     # actual models → "model" axis
-                block_col: "template",        # prompts → "template" axis
-                item_col: "input",
-                metric_col: "score",
-            }
-            if run_col and run_col in df.columns:
-                rename_multi[run_col] = "run"
-            df_multi = df_multi.rename(columns={k: v for k, v in rename_multi.items() if k != v})
-            bench = from_dataframe(df_multi, format="long", strict_complete_design=False)
-        else:
-            # No prompt col — single-model BenchmarkResult with model as template axis
-            df_io_keep = df[[factor_col_name, item_col, metric_col]
-                            + ([run_col] if run_col and run_col in df.columns else [])].copy()
-            rename_io = {factor_col_name: "template", item_col: "input", metric_col: "score"}
-            if run_col and run_col in df.columns:
-                rename_io[run_col] = "run"
-            df_io_keep = df_io_keep.rename(columns={k: v for k, v in rename_io.items() if k != v})
-            bench = from_dataframe(df_io_keep, format="long", strict_complete_design=False)
-
-        reference = baseline if baseline else "grand_mean"
-        analysis = analyze(bench, ci=ci_level, reference=reference, **engine_kwargs)
-
-        # model→"model" axis means model_level compares models (what the user requested).
-        # When bench is a BenchmarkResult (no prompts), the analysis is an AnalysisBundle
-        # and _mmb_view is irrelevant.
-        cr = ComparisonResult(
-            analysis,
-            factors=_user_factors,
-            metric=metric_col,
-            baseline=baseline,
-            alpha=alpha,
-            filtered_df=df,
-            _mmb_view="model_level",
-            min_meaningful_diff=min_meaningful_diff,
-            show_rank_probabilities=show_rank_probabilities,
-        )
-        _run_judge_alignment_if_needed(
-            cr, alignment=alignment, metric_col=metric_col, n_mc=n_mc,
-            alpha=alpha, ci_level=ci_level, engine_kwargs=engine_kwargs,
-            df=df, factor_col=factor_col_name, item_col=item_col, run_col=run_col,
-        )
-        _run_pareto_if_needed(
-            cr, secondary_metric=secondary_metric, df=df, factor_col=factor_col_name,
-            item_col=item_col, alpha=alpha, n_boot=max(n_mc, 1000),
-            rng=engine_kwargs.get("rng"),
-        )
-        return cr
-
-    # ── path B: prompt/template comparison ───────────────────────────────────
-    if is_prompt_comparison:
-        factor_col_name = prompt_col
-        block_col = model_col  # if models present, they become block axis
-
-        if block_col and block_col in df.columns:
-            # Multi-model path: prompt as template, model as model.
-            df_multi = df[[block_col, factor_col_name, item_col, metric_col]
-                          + ([run_col] if run_col and run_col in df.columns else [])].copy()
-            rename_multi = {
-                factor_col_name: "template",
-                block_col: "model",
-                item_col: "input",
-                metric_col: "score",
-            }
-            if run_col and run_col in df.columns:
-                rename_multi[run_col] = "run"
-            df_multi = df_multi.rename(columns={k: v for k, v in rename_multi.items() if k != v})
-            bench = from_dataframe(df_multi, format="long", strict_complete_design=False)
-        else:
-            df_io_keep = df[[factor_col_name, item_col, metric_col]
-                            + ([run_col] if run_col and run_col in df.columns else [])].copy()
-            rename_io = {factor_col_name: "template", item_col: "input", metric_col: "score"}
-            if run_col and run_col in df.columns:
-                rename_io[run_col] = "run"
-            df_io_keep = df_io_keep.rename(columns={k: v for k, v in rename_io.items() if k != v})
-            bench = from_dataframe(df_io_keep, format="long", strict_complete_design=False)
-
-        reference = baseline if baseline else "grand_mean"
-        analysis = analyze(bench, ci=ci_level, reference=reference, **engine_kwargs)
-
-        cr = ComparisonResult(
-            analysis,
-            factors=_user_factors,
-            metric=metric_col,
-            baseline=baseline,
-            alpha=alpha,
-            filtered_df=df,
-            _mmb_view="template_level",
-            min_meaningful_diff=min_meaningful_diff,
-            show_rank_probabilities=show_rank_probabilities,
-        )
-        _run_judge_alignment_if_needed(
-            cr, alignment=alignment, metric_col=metric_col, n_mc=n_mc,
-            alpha=alpha, ci_level=ci_level, engine_kwargs=engine_kwargs,
-            df=df, factor_col=factor_col_name, item_col=item_col, run_col=run_col,
-        )
-        _run_pareto_if_needed(
-            cr, secondary_metric=secondary_metric, df=df, factor_col=factor_col_name,
-            item_col=item_col, alpha=alpha, n_boot=max(n_mc, 1000),
-            rng=engine_kwargs.get("rng"),
-        )
-        return cr
-
-    # ── path C: arbitrary single factor column ────────────────────────────────
-    if is_canonical_col or (not is_factorial and factors_list[0] in df.columns):
-        factor_col_name = factors_list[0]
-
-        df_io_keep = df[[factor_col_name, item_col, metric_col]
-                        + ([run_col] if run_col and run_col in df.columns else [])].copy()
-        rename_io = {factor_col_name: "template", item_col: "input", metric_col: "score"}
-        if run_col and run_col in df.columns:
-            rename_io[run_col] = "run"
-        df_io_keep = df_io_keep.rename(columns={k: v for k, v in rename_io.items() if k != v})
-        bench = from_dataframe(df_io_keep, format="long", strict_complete_design=False)
-
-        reference = baseline if baseline else "grand_mean"
-        analysis = analyze(bench, ci=ci_level, reference=reference, **engine_kwargs)
-
-        cr = ComparisonResult(
-            analysis,
-            factors=_user_factors,
-            metric=metric_col,
-            baseline=baseline,
-            alpha=alpha,
-            filtered_df=df,
-            min_meaningful_diff=min_meaningful_diff,
-            show_rank_probabilities=show_rank_probabilities,
-        )
-        _run_judge_alignment_if_needed(
-            cr, alignment=alignment, metric_col=metric_col, n_mc=n_mc,
-            alpha=alpha, ci_level=ci_level, engine_kwargs=engine_kwargs,
-            df=df, factor_col=factor_col_name, item_col=item_col, run_col=run_col,
-        )
-        _run_pareto_if_needed(
-            cr, secondary_metric=secondary_metric, df=df, factor_col=factor_col_name,
-            item_col=item_col, alpha=alpha, n_boot=max(n_mc, 1000),
-            rng=engine_kwargs.get("rng"),
-        )
-        return cr
-
-    # ── path D-pre: canonical 2-factor ["model","prompt"] → multi-model path ──
-    # When the user passes exactly the standard factor names (not custom names
-    # that were remapped), prefer the richer MultiModelBundle path over factorial
-    # LMM — it's simpler, faster, and shows the cross-model ranking output the
-    # user usually wants.  An explicit LMM backend opt-in bypasses this.
-    _user_factors_list = [_user_factors] if isinstance(_user_factors, str) else list(_user_factors)
-    _is_canonical_2factor = (
-        is_factorial
-        and len(_user_factors_list) == 2
-        and all(f in _STANDARD_FACTOR_NAMES for f in _user_factors_list)
-        and model_col and model_col in df.columns
-        and prompt_col and prompt_col in df.columns
-        and engine_kwargs.get("backend") not in {"lmm", "factorial_lmm"}
-    )
-    if _is_canonical_2factor:
-        df_multi = df[
-            [model_col, prompt_col, item_col, metric_col]
-            + ([run_col] if run_col and run_col in df.columns else [])
-        ].copy()
-        rename_multi = {
-            model_col: "model",
-            prompt_col: "template",
-            item_col: "input",
-            metric_col: "score",
-        }
-        if run_col and run_col in df.columns:
-            rename_multi[run_col] = "run"
-        df_multi = df_multi.rename(columns={k: v for k, v in rename_multi.items() if k != v})
-        bench = from_dataframe(df_multi, format="long", strict_complete_design=False)
-        reference = baseline if baseline else "grand_mean"
-        analysis = analyze(bench, ci=ci_level, reference=reference, **engine_kwargs)
-        return ComparisonResult(
-            analysis,
-            factors=_user_factors,
-            metric=metric_col,
-            baseline=baseline,
-            alpha=alpha,
-            filtered_df=df,
-            _mmb_view="model_level",
-            min_meaningful_diff=min_meaningful_diff,
-            show_rank_probabilities=show_rank_probabilities,
-        )
-
-    # ── path D: factorial (multiple factors → LMM) ────────────────────────────
-    if is_factorial:
-        # Validate all factor columns exist
-        missing_factors = [f for f in factors_list if f not in df.columns]
-        if missing_factors:
-            raise EvalLoadError(
-                f"Factor column(s) {missing_factors} not found in data. "
-                f"Available columns: {list(df.columns)}"
-            )
-
-        # Rename metric and item cols to what analyze_factorial expects
-        df_fact = df.copy()
-        rename_fact: dict[str, str] = {}
-        if metric_col != "score":
-            rename_fact[metric_col] = "score"
-            df_fact = df_fact.rename(columns=rename_fact)
-            score_col_name = "score"
-        else:
-            score_col_name = "score"
-
-        factorial_kwargs = {
-            k: v for k, v in engine_kwargs.items()
-            if k in {"backend", "ci", "correction", "reference",
-                     "spread_percentiles", "failure_threshold", "n_sim", "rng"}
-        }
-        if "ci" not in factorial_kwargs:
-            factorial_kwargs["ci"] = ci_level
-
-        run_col_fact = run_col if run_col and run_col in df_fact.columns else None
-
-        analysis = analyze_factorial(
-            df_fact,
-            factors=factors_list,
-            random_effect=item_col,
-            score_col=score_col_name,
-            run_col=run_col_fact,
-            **factorial_kwargs,
-        )
-
-        return ComparisonResult(
-            analysis,
-            factors=_user_factors,
-            metric=metric_col,
-            baseline=baseline,
-            alpha=alpha,
-            filtered_df=df,
-            min_meaningful_diff=min_meaningful_diff,
-            show_rank_probabilities=show_rank_probabilities,
-        )
-
-    raise EvalLoadError(
-        f"Could not dispatch compare() for factors={factors!r}. "
-        f"Factor column(s) not found in data. Available columns: {list(df.columns)}"
-    )
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Thin wrappers
-# ─────────────────────────────────────────────────────────────────────────────
-
-def compare_models(evaldata: EvalResults, **kwargs) -> ComparisonResult:
-    """Compare models — equivalent to ``compare(evaldata, factors="model", ...)``.
-
-    All keyword arguments are forwarded to :func:`compare`.
-    """
-    return compare(evaldata, factors="model", **kwargs)
-
-
-def compare_prompts(evaldata: EvalResults, **kwargs) -> ComparisonResult:
-    """Compare prompt templates — equivalent to ``compare(evaldata, factors="prompt", ...)``.
-
-    All keyword arguments are forwarded to :func:`compare`.
-    """
-    return compare(evaldata, factors="prompt", **kwargs)

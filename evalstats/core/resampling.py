@@ -2118,8 +2118,12 @@ def modified_obuchowski_paired_ci(
     Cluster-level and assumption-free about the within-cluster correlation
     structure: no ICC is estimated at all. Yang et al. (2012) recommend this
     over Obuchowski's and Durkalski's variants on power grounds for larger
-    numbers of clusters. The underlying X^2_MO statistic in this module's
-    tests reproduces the reference R implementation (clust.bin.pair) exactly.
+    numbers of clusters. Reproduces the reference R implementation
+    (``clust.bin.pair``) exactly, but has no small-sample adjustment (at R=1
+    it's bit-identical to the unregularised Wald interval on item differences,
+    and returns a zero-width interval at zero discordance); kept as a citable
+    negative result, not a recommended method (see
+    ``simulations/harness/methods.py``).
     """
     a_k, b_k, c_k, d_k = _clustered_paired_cells(
         values_a, values_b, "modified_obuchowski_paired_ci"
@@ -2613,20 +2617,20 @@ def mj_floor_paired_ci_multirun_cluster(
     values_b: np.ndarray,
     alpha: float,
 ) -> tuple[float, float]:
-    """Cluster-robust Tango CI for paired binary difference.
+    """Cluster-robust Tango-style CI for paired binary difference.
+
+    This is what ``pairwise_differences(method='mj_floor')`` dispatches to for
+    multi-run data (see :func:`~evalstats.core.paired.pairwise_differences`).
+    NOTE: this method is not Tango's own interval despite the name it carried
+    before 2026-08-24 (see :func:`mj_floor_paired_ci`).
 
     The additive discordance term in the discriminant is floored at 1/4 (see
     :func:`_mj_discordance_floor`); this is the multi-run analogue of the
     single-run floor in :func:`mj_floor_paired_ci`, using the mean per-item
-    discordance mass as S_hat. NOTE: this method is NOT Tango's interval
-    despite the name it carried before 2026-08-24.
+    discordance mass as S_hat.
 
-    Treats each item as the unit of analysis. Uses the variance of
-    per-item paired differences directly, avoiding fragile within/between
-    decomposition.
-
-    This is the most robust multirun extension: runs are treated as
-    internal noise already reflected in delta_i.
+    Treats each item as the unit of analysis, using the variance of per-item
+    paired differences directly rather than a within/between decomposition.
 
     Reduces exactly to mj_floor_paired_ci when n_runs == 1.
     """
@@ -2695,15 +2699,13 @@ def mj_floor_paired_ci_multirun_effective(
     discordance mass as S_hat. NOTE: this method is NOT Tango's interval
     despite the name it carried before 2026-08-24.
 
-    This is ``mj_floor_er`` in the paper's CI decision-tree figure and appendix (called "ER-Tango" before the 2026-08-24 rename):
-    the multi-run pairwise-binary method for N >= 50 (``method='mj_floor'``
-    dispatches here automatically when R >= 3 seeded runs are present -- see
-    :func:`pairwise_differences`).
+    Not the method ``pairwise_differences(method='mj_floor')`` dispatches to for
+    multi-run data -- that's :func:`mj_floor_paired_ci_multirun_cluster`. This
+    variant remains available as an alternative/comparison point (see
+    ``simulations/harness``), not as a routed default.
 
     Adjusts within-item variance using an estimated effective number of runs
     to account for correlation between runs.
-
-    This preserves efficiency while avoiding variance underestimation.
     """
     values_a = np.asarray(values_a)
     values_b = np.asarray(values_b)
@@ -2788,10 +2790,9 @@ def mj_floor_paired_ci_multirun_moments(
     despite the name it carried before 2026-08-24.
 
     Not the method ``pairwise_differences(method='mj_floor')`` dispatches to
-    for multi-run data -- that's :func:`mj_floor_paired_ci_multirun_effective`
-    ("ER-Tango" in the paper). This variant remains available as an
-    alternative/comparison point (see ``simulations/harness``), not as a
-    routed default.
+    for multi-run data -- that's :func:`mj_floor_paired_ci_multirun_cluster`.
+    This variant remains available as an alternative/comparison point (see
+    ``simulations/harness``), not as a routed default.
 
     This variant estimates the paired risk-difference uncertainty via
     item-level moments of paired run differences:
@@ -2892,32 +2893,28 @@ def mj_floor_paired_ci_multirun_moments(
 #     p12 + p21           = (sum_i D_i^2 + 2) / (n + 2)
 #     variance term       = mean(D^2) - mean(D)^2, both means over n + 2
 #
-# i.e. BONETT-PRICE IS THE PLAIN WALD INTERVAL ON THE MEAN OF D, COMPUTED ON
-# THE SAMPLE AUGMENTED BY TWO PSEUDO-ITEMS, ONE WITH D = +1 AND ONE WITH
+# i.e. Bonett-Price is the plain Wald interval on the mean of D, computed on
+# the sample augmented by two pseudo-items, one with D = +1 and one with
 # D = -1 -- with the ddof=0 plug-in variance and the divisor n + 2 used
-# consistently for the mean, the variance and the standard error. (Verified
+# consistently for the mean, the variance and the standard error (verified
 # numerically against :func:`bonett_price_paired_ci` to 2e-16 over a grid of
-# n and alpha; see tests/test_bonett_price_multirun.py.) The Laplace
+# n and alpha; see tests/test_bonett_price_multirun.py). The Laplace
 # adjustment is the two pseudo-items: they cancel in the numerator of the
 # point estimate, shrinking it toward 0 by n/(n+2), and they contribute 2 to
 # the second moment, which is what keeps the variance term strictly positive
 # when no pairs disagree.
 #
-# That reading is what makes the multi-run generalisation obvious, and it
-# settles the question the "+1/+2" naturally raises -- whether the
-# pseudo-counts should be scaled by the number of runs R. They should NOT.
-# The pseudo-observations are ITEMS, not runs: two extra items, each of which
-# happens to be perfectly concordant across all R of its own runs (delta = +1
-# and -1, so within-item variance 0). Scaling them to R pseudo-runs
-# (equivalently, using pseudo-items with delta = +-1/R) makes the whole
-# regularisation vanish as R grows, so at zero observed discordance the
-# interval would collapse toward zero width -- exactly the degeneracy the
-# Laplace adjustment exists to prevent. Item-level heterogeneity is bounded
-# by N, not by N*R: more runs per item tell you nothing about items you never
-# sampled. That variant was implemented and measured, and it does fail this
-# way; the numbers are in tests/test_bonett_price_multirun.py
-# (``test_per_run_laplace_scaling_degenerates``), kept as a regression guard
-# so nobody re-derives it.
+# This reading settles whether the pseudo-counts should be scaled by the
+# number of runs R -- they should not. The pseudo-observations are ITEMS,
+# not runs: two extra items, each perfectly concordant across all R of its
+# own runs (delta = +1 and -1, so within-item variance 0). Scaling them to R
+# pseudo-runs (pseudo-items with delta = +-1/R) makes the whole
+# regularisation vanish as R grows, collapsing the interval toward zero
+# width at zero observed discordance -- exactly the degeneracy the Laplace
+# adjustment exists to prevent. Item-level heterogeneity is bounded by N,
+# not by N*R: more runs per item tell you nothing about items never sampled.
+# See tests/test_bonett_price_multirun.py's
+# ``test_per_run_laplace_scaling_degenerates`` for the regression guard.
 #
 # So, for (N, R) data, work at the item scale throughout:
 #
@@ -2940,23 +2937,22 @@ def mj_floor_paired_ci_multirun_moments(
 # needed anywhere.
 #
 # WHY NO EXPLICIT BETWEEN-RUN CORRELATION TERM. V~ is already the right
-# quantity. Items are the sampling unit and are iid; whatever correlation
-# the R runs of item i have with each other only affects Var(delta_i), and
-# Var(delta_i) is exactly what the item-level spread measures. Concretely,
-# under the usual one-way random-effects decomposition
+# quantity: items are the sampling unit and are iid, and whatever
+# correlation the R runs of item i have with each other only affects
+# Var(delta_i), which is exactly what the item-level spread measures.
+# Concretely, under the usual one-way random-effects decomposition
 #
 #     Var(delta_i) = sigma_B^2 + sigma_W^2/R * (1 + (R-1)*rho)
 #
 # the design-effect factor is *inside* the quantity being estimated, so
-# estimating Var(delta_i) directly needs no rho at all. This is not a hand
-# wave: applying Kish's R_eff = R/(1 + (R-1)*rho) the way it is meant to be
-# applied -- pool all N*R runs for a run-level variance B~ = u~ - delta~^2,
-# estimate the run-level ICC rho = 1 - sigma_W^2/B~ with the UNBIASED within
-# estimate sigma_W^2 = R/(R-1) * w~, then inflate by the design effect --
-# gives B~ * (1 + (R-1)*rho) / R == V~ IDENTICALLY, to machine precision and
-# for every input, not merely in expectation. The design-effect correction
-# and the item-level variance are the same estimator written two ways. (Also
-# verified in tests/test_bonett_price_multirun.py.)
+# estimating Var(delta_i) directly needs no rho at all: applying Kish's
+# R_eff = R/(1 + (R-1)*rho) explicitly -- pool all N*R runs for a run-level
+# variance B~ = u~ - delta~^2, estimate the run-level ICC
+# rho = 1 - sigma_W^2/B~ with the unbiased within estimate
+# sigma_W^2 = R/(R-1) * w~, then inflate by the design effect -- gives
+# B~ * (1 + (R-1)*rho) / R == V~ identically, for every input (verified in
+# tests/test_bonett_price_multirun.py). The design-effect correction and the
+# item-level variance are the same estimator written two ways.
 #
 # So the three variants below differ ONLY in a floor applied to V~, mirroring
 # what mj_floor's three multi-run variants turn out to differ by (their
@@ -3074,76 +3070,47 @@ def bonett_price_paired_ci_multirun_shrunk(
     values_b: np.ndarray,
     alpha: float = 0.05,
 ) -> tuple[float, float]:
-    """Multi-run Bonett-Price with the pseudo-item MAGNITUDE Laplace-shrunk.
+    """Multi-run Bonett-Price with the pseudo-item magnitude Laplace-shrunk.
+    The shipped default for multi-run Bonett-Price data (see
+    :func:`~evalstats.core.paired.pairwise_differences`).
 
-    :func:`bonett_price_paired_ci_multirun_cluster` pins its two pseudo-items at
-    ``delta = +/-1``, the largest possible item-level discordance. At ``R = 1``
-    that is exactly right -- every discordant item has ``delta_i^2 = 1``, so a
-    pseudo-item IS one more typical discordant item, which is what a Laplace
-    pseudo-count means. At ``R > 1`` it stops being right: a discordant item's
-    ``delta_i^2`` shrinks toward its squared per-item rate, while the pseudo-mass
-    stays at 2, so the pseudo-items become several times heavier than any real
-    item and the floor progressively swallows the variance.
+    :func:`bonett_price_paired_ci_multirun_cluster` pins its two pseudo-items
+    at ``delta = +/-1``, the largest possible item-level discordance. At
+    ``R = 1`` that's exactly right (every discordant item has
+    ``delta_i^2 = 1``), but at ``R > 1`` a discordant item's ``delta_i^2``
+    shrinks toward its squared per-item rate while the pseudo-mass stays at
+    2, so the pseudo-items become disproportionately heavy and the floor
+    overcorrects.
 
-    The fix applies Bonett-Price's own device a second time -- once to the
-    discordance RATE (which the ``n + 2`` denominator already does) and once to
-    the discordance MAGNITUDE, shrinking it toward the ``R = 1`` reference of 1
-    with the same weight of two pseudo-items::
+    This variant shrinks the pseudo-item magnitude the same way Bonett-Price
+    already shrinks the discordance rate::
 
         m2 = (sum_i delta_i^2 + 2) / (sum_i u_i + 2),   u_i = mean_r |A_ir - B_ir|
 
-    and each pseudo-item then carries ``delta^2 = m2`` (still ``+/-sqrt(m2)``, so
-    they cancel in the mean and the centre is unchanged).
+    Each pseudo-item then carries ``delta^2 = m2`` (as ``+/-sqrt(m2)``, so
+    they still cancel in the mean). ``sum_i u_i`` is the effective count of
+    fully-discordant items, so an item discordant on 1 of 20 runs contributes
+    0.05 rather than 1 -- a plain count of discordant items instead collapses
+    ``m2`` toward 0 when items flip sign across runs, undoing the correction.
 
-    ``sum_i u_i`` is the EFFECTIVE number of fully-discordant items: an item
-    discordant on 1 of 20 runs contributes 0.05, not 1. Using a plain count of
-    discordant items instead fails badly when items flip sign across runs --
-    many items are then discordant on a few runs each, the count is large while
-    the mass is small, and ``m2`` collapses to ~0.2, removing the very
-    correction it exists to supply (measured MinCov .8268 vs .9296 on a
-    300-cell sweep).
+    ``m2`` is a shrinkage estimator: ``m2 = w * (sum delta_i^2 / sum u_i) +
+    (1 - w) * 1`` with ``w = sum u_i / (sum u_i + 2)``, i.e. the observed
+    mean squared discordance magnitude shrunk toward the R=1 reference value
+    of 1. (An earlier variant used the data term alone, ``w = 1``: it
+    undercovered badly wherever discordance was sparse, since the quantity
+    it shrinks toward zero has nothing holding it up.)
 
-    Two properties make the construction easy to state. First, since
-    ``delta_i^2 <= |delta_i| <= u_i`` for every item, ``sum delta_i^2 <=
-    sum u_i`` and therefore ``m2`` lies in ``(0, 1]``, with ``m2 = 1`` exactly
-    when every discordant item is fully sign-consistent across its runs (which
-    includes ``R = 1``). The pseudo-mass can never exceed Bonett-Price's own,
-    and can never vanish. Second, ``m2`` IS a shrinkage estimator::
+    Properties: reduces to :func:`bonett_price_paired_ci` bit-for-bit at
+    R=1 (``m2 = 1`` exactly, since ``delta_i^2 = u_i`` there); ``m2 = 1`` at
+    zero discordance too, matching the ``+/-1`` construction; replication-
+    invariant (R identical copies of one run leave the interval unchanged);
+    antisymmetric under swapping the two arms.
 
-        m2 = w * (sum delta_i^2 / sum u_i) + (1 - w) * 1,
-        w  = sum u_i / (sum u_i + 2)
-
-    (an identity, verified to 2.2e-16). The data term is the observed mean
-    squared magnitude per unit of discordance mass, the prior is the ``R = 1``
-    value of 1, and the weight is "effective discordant items against two
-    pseudo-items". That is also the diagnosis of an earlier variant that used
-    the data term ALONE (``w = 1``, no prior): it undercovered badly wherever
-    discordance was sparse, because the quantity it shrinks toward zero has
-    nothing holding it up.
-
-    Properties, all verified to machine precision:
-
-    * ``R = 1``: ``u_i = |D_i|`` and ``delta_i^2 = |D_i|``, so
-      ``sum delta_i^2 = sum u_i`` and ``m2 = 1`` EXACTLY -- this reduces to
-      :func:`bonett_price_paired_ci` bit-for-bit, with no special case.
-    * Zero discordance: ``m2 = 1``, matching the ``+/-1`` construction, which was
-      already correct there.
-    * Replication invariance: both sums depend only on the per-item values, so
-      ``R`` identical copies of one run leave the interval unchanged.
-    * Antisymmetry under swapping the two arms.
-
-    Note on measured worst-case coverage: a MinCov taken over many cells at
-    modest reps is biased low by selection. The three cells below .93 in the
-    1536-cell sweep at reps=500 all returned .948-.954 when rerun at
-    reps=20000, i.e. they were 1-2 MC standard errors low, not failures.
-
-    Calibration on a 300-cell sweep (5 discordance shapes x n in 20..100 x R in
-    2..20 x five run-consistency mixtures): MinCov .9296 with one cell below
-    .93, mean coverage .9744, at 94% of the ``+/-1`` construction's width. The
-    ``+/-1`` form remains better on worst case (MinCov .9444, no cells below
-    .93) and is still the shipped default; this variant is closer to nominal on
-    average and narrower.
-    """
+    On a 300-cell calibration sweep (5 discordance shapes x n in 20..100 x
+    R in 2..20 x five run-consistency mixtures), this is narrower on
+    average (94% of the ``+/-1`` construction's width) but with a slightly
+    worse worst case (MinCov .9296 vs .9444 for
+    :func:`bonett_price_paired_ci_multirun_cluster`)."""
     delta_i, u_i = _bp_item_moments(
         values_a, values_b, "bonett_price_paired_ci_multirun_shrunk"
     )
@@ -3158,9 +3125,6 @@ def bonett_price_paired_ci_multirun_shrunk(
 def resolve_resampling_method(
     method: Literal["bootstrap", "bca", "bayes_bootstrap", "smooth_bootstrap", "bootstrap_t", "auto"],
     sample_size: int,
-    *,
-    bca_min_n: int = 15,
-    bca_max_n: int = 200,
 ) -> Literal["bootstrap", "bca", "bayes_bootstrap", "smooth_bootstrap", "bootstrap_t"]:
     """Resolve ``method='auto'`` to a concrete bootstrap method.
 
@@ -3169,7 +3133,6 @@ def resolve_resampling_method(
     and at least as accurate at that scale) and ``'bootstrap_t'`` otherwise.
     ``'bayes_bootstrap'`` and ``'smooth_bootstrap'`` are passed through unchanged.
     """
-    _ = (bca_min_n, bca_max_n)
     if method == "auto":
         return "bootstrap" if sample_size >= BOOTSTRAP_AUTO_MIN_N else "bootstrap_t"
     return method  # type: ignore[return-value]

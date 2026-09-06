@@ -375,7 +375,6 @@ def main():
     )
     fig = estats.plot_point_estimates(
         result_2d,
-        reference="grand_mean",
         title=(
             f"Prompt Template Comparison — Sentiment Classification\n"
             f"({MODEL}, composite score averaged over {len(EVALUATORS)} evaluators)"
@@ -397,7 +396,6 @@ def main():
         )
         fig_e = estats.plot_point_estimates(
             ev_result,
-            reference="grand_mean",
             title=f"Template Advantage — evaluator: {e_name}\n({MODEL})",
             rng=np.random.default_rng(0),
         )

@@ -347,8 +347,8 @@ def _build_parser() -> argparse.ArgumentParser:
         default="grand_mean",
         metavar="LABEL",
         help=(
-            "Reference label retained for compatibility. In robustness-first mode, "
-            "absolute means and CIs are reported directly."
+            "Template label to report advantages relative to, instead of the "
+            "grand mean (default: grand_mean)."
         ),
     )
     analyze.add_argument(
@@ -365,7 +365,8 @@ def _build_parser() -> argparse.ArgumentParser:
         default=(10.0, 90.0),
         metavar=("LOW", "HIGH"),
         help=(
-            "Retained for compatibility (default: 10 90)."
+            "Percentiles for the per-input spread band shown alongside the CI "
+            "(default: 10 90)."
         ),
     )
     analyze.add_argument(
@@ -670,7 +671,6 @@ def _cmd_analyze(args: argparse.Namespace) -> None:
             "below this floor are too noisy to be meaningful). Expand your eval set."
         )
 
-    # --- Validate --evaluator-mode ---
     evaluator_mode = args.evaluator_mode
 
     # --- Validate --reference ---
@@ -697,7 +697,7 @@ def _cmd_analyze(args: argparse.Namespace) -> None:
             backend=getattr(args, "backend", "statsmodels"),
             ci=ci,
             n_bootstrap=getattr(args, "n_bootstrap", 10_000),
-            correction=getattr(args, "correction", "fdr_bh"),
+            correction=args.correction,
             spread_percentiles=tuple(getattr(args, "spread_percentiles", (10, 90))),
             failure_threshold=getattr(args, "failure_threshold", None),
             statistic=getattr(args, "statistic", "mean"),

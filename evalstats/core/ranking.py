@@ -174,8 +174,8 @@ def bootstrap_ranks(
         Random number generator for reproducibility.
     statistic : str
         Statistic used to aggregate scores across inputs when determining
-        template rankings per bootstrap resample: ``'median'`` (default)
-        or ``'mean'``.
+        template rankings per bootstrap resample: ``'mean'`` (default)
+        or ``'median'``.
 
     Returns
     -------

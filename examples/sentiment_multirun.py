@@ -299,7 +299,7 @@ def main():
     analysis_by_eval = estats.analyze(
         result,
         evaluator_mode="per_evaluator",
-        reference="grand_mean",
+
         method="auto",
         n_bootstrap=3_000,
         correction="holm",
@@ -312,7 +312,7 @@ def main():
     analysis_agg = estats.analyze(
         result,
         evaluator_mode="aggregate",
-        reference="grand_mean",
+
         method="auto",
         n_bootstrap=5_000,
         correction="holm",
@@ -329,7 +329,6 @@ def main():
     )
     fig = estats.plot_point_estimates(
         result_2d,
-        reference="grand_mean",
         title=(
             f"Prompt Template Comparison — Sentiment Classification\n"
             f"({MODEL}, {N_RUNS} runs, composite score averaged over {len(EVALUATORS)} evaluators)"

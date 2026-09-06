@@ -543,7 +543,7 @@ def main() -> None:
     analysis_per = estats.analyze(
         result,
         evaluator_mode="per_evaluator",
-        reference="grand_mean",
+
         method="auto",
         n_bootstrap=3_000,
         correction="holm",
@@ -558,7 +558,7 @@ def main() -> None:
     analysis_agg = estats.analyze(
         result,
         evaluator_mode="aggregate",
-        reference="grand_mean",
+
         method="auto",
         n_bootstrap=5_000,
         correction="holm",
@@ -577,7 +577,6 @@ def main() -> None:
     )
     fig = estats.plot_point_estimates(
         result_2d,
-        reference="grand_mean",
         title=(
             "Prompt Template Comparison — Document Summarization\n"
             f"({SUMMARIZER_MODEL}, {N_RUNS} runs, "

@@ -7,7 +7,7 @@ keeping the analysis router (router.py) free of display concerns.
 from __future__ import annotations
 
 import re
-from typing import TYPE_CHECKING, Literal, Mapping, Optional, Union
+from typing import Literal, Mapping, Optional, Union
 
 import numpy as np
 
@@ -490,17 +490,10 @@ def print_pairwise_summary(
     # --- Behavioral agreement (binary data only) ---
     if pair.agreement_mcc is not None and pair.binary_confusion is not None:
         mcc = pair.agreement_mcc
-        n11, n10, n01, n00 = pair.binary_confusion
-        N = n11 + n10 + n01 + n00
-        # bar = _agreement_bar(n11, n10, n01, n00, width=20)
         strength = _mcc_strength(mcc)
-        # pct_pass = f"{100*n11/N:.0f}%" if N else "—"
-        # pct_fail = f"{100*n00/N:.0f}%" if N else "—"
-        # pct_split = f"{100*(n10+n01)/N:.0f}%" if N else "—"
         interpretation = _mcc_interpretation(mcc)
         print()
         print(f"  Behavioral agreement (MCC):  {mcc:+.3f}  — {strength} overlap - {interpretation}")
-        # print(f"  [{bar}]  \u2588 both pass ({pct_pass})  \u2591 both fail ({pct_fail})  \u2592 disagree ({pct_split})")
 
     print()
 

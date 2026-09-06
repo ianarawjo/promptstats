@@ -304,17 +304,6 @@ def _extract_template_means(model: Any, labels: list[str]) -> np.ndarray:
     return means
 
 
-def _t_crit_from_result_fit(model: Any, alpha: float) -> float:
-    """Return the conservative t critical value from the fixed-effects DFs."""
-    rf = model.result_fit
-    df_col = next((c for c in ["df", "DF", "df_error", "Df", "Ddf"] if c in rf.columns), None)
-    if df_col is not None:
-        min_df = float(rf[df_col].min())
-        return float(scipy.stats.t.ppf(1 - alpha / 2, df=min_df))
-    # Fall back to standard normal (conservative for large N)
-    return float(scipy.stats.norm.ppf(1 - alpha / 2))
-
-
 # ---------------------------------------------------------------------------
 # Shared low-level helpers (backend-agnostic)
 # ---------------------------------------------------------------------------
@@ -382,39 +371,6 @@ def _apply_pvalue_correction(
             statistic=r.statistic,
         )
     return resolved
-
-
-def _compute_raw_advantages_and_spread(
-    cell_means_2d: np.ndarray,
-    ref_idx: Optional[int],
-    spread_percentiles: tuple[float, float],
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Compute per-input raw advantages and intrinsic spread bands.
-
-    Parameters
-    ----------
-    cell_means_2d : np.ndarray, shape ``(N, M)``
-        Cell-mean scores: N templates × M inputs.
-    ref_idx : int or None
-        Index of the reference template (for a specific-template reference)
-        or ``None`` (for the grand-mean reference).
-    spread_percentiles : tuple[float, float]
-        ``(low_pct, high_pct)`` percentiles used for the spread band.
-
-    Returns
-    -------
-    raw_advantages : np.ndarray, shape ``(N, M)``
-    spread_low : np.ndarray, shape ``(N,)``
-    spread_high : np.ndarray, shape ``(N,)``
-    """
-    if ref_idx is None:
-        cell_ref = np.nanmean(cell_means_2d, axis=0)   # (M,) — NaN-safe grand mean
-    else:
-        cell_ref = cell_means_2d[ref_idx]               # (M,)
-    raw_advantages = cell_means_2d - cell_ref[np.newaxis, :]   # (N, M)
-    spread_low  = np.nanpercentile(raw_advantages, spread_percentiles[0], axis=1)
-    spread_high = np.nanpercentile(raw_advantages, spread_percentiles[1], axis=1)
-    return raw_advantages, spread_low, spread_high
 
 
 # ---------------------------------------------------------------------------
@@ -528,64 +484,6 @@ def _lmm_to_pairwise(
 
     _resolved_correction = _apply_pvalue_correction(results, pairs, correction, n_groups=len(labels))
     return PairwiseMatrix(labels=labels, results=results, correction_method=_resolved_correction)
-
-
-# ---------------------------------------------------------------------------
-# Mean advantage
-# ---------------------------------------------------------------------------
-
-def _build_advantage_contrast_matrix(N: int, ref_idx: Optional[int]) -> np.ndarray:
-    """Build the (N × N) contrast matrix L for template advantages.
-
-    Each row L[i] is a vector of coefficients such that::
-
-        advantage[i] = L[i] @ beta
-
-    where ``beta = [intercept, β₁, …, β_{N-1}]`` uses treatment coding
-    with ``template_labels[0]`` as the reference level.
-
-    Parameters
-    ----------
-    N : int
-        Number of templates.
-    ref_idx : int or None
-        Index of the reference template, or ``None`` for grand-mean reference.
-    """
-    L = np.zeros((N, N))
-
-    if ref_idx is None:
-        # Grand-mean reference: advantage_i = μ_i - (1/N) * Σ_k μ_k
-        #
-        # μ₀ = β₀,   μⱼ = β₀ + βⱼ  (j > 0)
-        # grand_mean = β₀ + (1/N) * Σ_{j>0} βⱼ
-        #
-        # advantage_0 = -(1/N) * Σ_{j>0} βⱼ  →  L[0, 1:] = -1/N
-        # advantage_i = βᵢ - (1/N) * Σ_{j>0} βⱼ
-        #             →  L[i, i] = 1 - 1/N,  L[i, j≠i, j>0] = -1/N
-        L[0, 1:] = -1.0 / N
-        for i in range(1, N):
-            L[i, 1:] = -1.0 / N
-            L[i, i]  =  1.0 - 1.0 / N
-    else:
-        # Specific-template reference: advantage_i = μ_i - μ_{ref}
-        #
-        # Cases (treatment coding, ref level = template 0):
-        #   i == ref_idx               → advantage = 0   (L[i] = 0)
-        #   i == 0, ref_idx > 0        → -β_{ref}
-        #   i > 0,  ref_idx == 0       → β_i
-        #   i > 0,  ref_idx > 0, i≠ref → β_i - β_{ref}
-        for i in range(N):
-            if i == ref_idx:
-                continue  # all zeros
-            if i == 0:
-                L[i, ref_idx] = -1.0
-            elif ref_idx == 0:
-                L[i, i] = 1.0
-            else:
-                L[i, i]       =  1.0
-                L[i, ref_idx] = -1.0
-
-    return L
 
 
 # ---------------------------------------------------------------------------

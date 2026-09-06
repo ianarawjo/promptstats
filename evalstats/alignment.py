@@ -248,9 +248,7 @@ class AlignmentResult:
 
         # This check compares a correlation against ICC(2,1), so the only thing
         # it can see is a systematic shift or compression of the judge's raw
-        # scores. PPI absorbs that either way (verified: a judge compressed to
-        # 0.55x with a +0.9 offset understates a true +0.50 effect as +0.27 raw,
-        # and the corrected estimate recovers +0.51), so the result never changes
+        # scores. PPI corrects for that regardless, so the result never changes
         # whether to correct. Only the FAILING branch is printed here, because it
         # says something about the judge worth knowing; a passing result is not
         # evidence that correction can be skipped -- the bias PPI is most needed
@@ -1606,6 +1604,48 @@ def _check_label_contiguity(n_total: int, labeled_mask: np.ndarray) -> dict:
 _VALID_SELECTIONS = ("random", "stratified", "manual", "unknown")
 
 
+def _validate_and_warn_selection(selection: str, warn_stacklevel: int) -> None:
+    """Validate ``selection=`` and warn about its MCAR implications.
+
+    Shared by :func:`_judge_alignment_core` and :func:`_judge_alignment_pairwise`.
+    """
+    if selection not in _VALID_SELECTIONS:
+        raise ValueError(
+            f"selection={selection!r} -- must be one of {_VALID_SELECTIONS}."
+        )
+    if selection == "unknown":
+        warnings.warn(
+            "judge_alignment() was not told how the labeled subset was "
+            "selected (selection=). Every correction it and "
+            "compare(alignment=...) apply assumes the labeled items are a "
+            "random sample of the full item pool -- pass selection='random' "
+            "to confirm that's the case, or selection='manual'/'stratified' "
+            "if not, so this is a deliberate acknowledgment rather than an "
+            "unexamined default.",
+            UserWarning, stacklevel=warn_stacklevel,
+        )
+    elif selection == "manual":
+        warnings.warn(
+            "selection='manual': the labeled subset was NOT randomly "
+            "sampled. PPI/alignment correction assumes random sampling "
+            "(MCAR) to be valid -- with a manually-chosen subset, the "
+            "corrected estimates and CIs compare()/judge_alignment() report "
+            "may be miscalibrated, not just imprecise. Treat them as "
+            "informal unless the alignment set is re-sampled at random.",
+            UserWarning, stacklevel=warn_stacklevel,
+        )
+    elif selection == "stratified":
+        warnings.warn(
+            "selection='stratified': evalstats' current correction doesn't "
+            "account for stratification weights, so this is only valid if "
+            "each stratum was itself sampled uniformly at random and the "
+            "strata are otherwise ignorable for the metric being judged. "
+            "If items were hand-picked within strata, treat corrected "
+            "estimates as potentially biased, same as selection='manual'.",
+            UserWarning, stacklevel=warn_stacklevel,
+        )
+
+
 def _judge_alignment_core(
     llm_aligned: np.ndarray,
     human_aligned: np.ndarray,
@@ -1639,10 +1679,7 @@ def _judge_alignment_core(
     when this is called from raw paired arrays with no further context,
     see :func:`judge_alignment`.
     """
-    if selection not in _VALID_SELECTIONS:
-        raise ValueError(
-            f"selection={selection!r} -- must be one of {_VALID_SELECTIONS}."
-        )
+    _validate_and_warn_selection(selection, warn_stacklevel)
     n_labeled = int(len(llm_aligned))
 
     calibration = _fit_calibration(llm_aligned, human_aligned, score_type)
@@ -1722,41 +1759,6 @@ def _judge_alignment_core(
                 UserWarning,
                 stacklevel=warn_stacklevel,
             )
-
-    if selection == "unknown":
-        warnings.warn(
-            "judge_alignment() was not told how the labeled subset was "
-            "selected (selection=). Every correction it and "
-            "compare(alignment=...) apply assumes the labeled items are a "
-            "random sample of the full item pool -- pass selection='random' "
-            "to confirm that's the case, or selection='manual'/'stratified' "
-            "if not, so this is a deliberate acknowledgment rather than an "
-            "unexamined default.",
-            UserWarning,
-            stacklevel=warn_stacklevel,
-        )
-    elif selection == "manual":
-        warnings.warn(
-            "selection='manual': the labeled subset was NOT randomly "
-            "sampled. PPI/alignment correction assumes random sampling "
-            "(MCAR) to be valid -- with a manually-chosen subset, the "
-            "corrected estimates and CIs compare()/judge_alignment() report "
-            "may be miscalibrated, not just imprecise. Treat them as "
-            "informal unless the alignment set is re-sampled at random.",
-            UserWarning,
-            stacklevel=warn_stacklevel,
-        )
-    elif selection == "stratified":
-        warnings.warn(
-            "selection='stratified': evalstats' current correction doesn't "
-            "account for stratification weights, so this is only valid if "
-            "each stratum was itself sampled uniformly at random and the "
-            "strata are otherwise ignorable for the metric being judged. "
-            "If items were hand-picked within strata, treat corrected "
-            "estimates as potentially biased, same as selection='manual'.",
-            UserWarning,
-            stacklevel=warn_stacklevel,
-        )
 
     for key in ("pearson_r", "spearman_r"):
         if key in alignment_metrics:
@@ -1966,18 +1968,15 @@ def _judge_alignment_from_arrays(
 _VALID_DESIGNS = ("within", "between")
 
 # Which correlation governs each evalstats.tests function's PPI variance
-# reduction, precisely -- NOT a fixed "Pearson for mean tests, Spearman for
-# rank tests" recipe (an earlier version of this table used that split; it's
-# WRONG for rank tests). Every test's rho is actually a Pearson correlation
-# on a test-specific LINEARIZATION of the raw values -- identity for
-# mean-type tests (whose influence function psi(y)=y-mu is already linear,
-# hence exactly effect-size-invariant), but a genuine transform for rank-type
-# tests, whose named/raw-Spearman recipe DRIFTS with effect size (confirmed
-# via Monte Carlo: -13% to -38% at d=2 for mwu/kruskal/wilcoxon, -89% for
-# friedman at higher effects -- see notes/omnibus_label_efficiency.html and
-# the git history around commits 8460a16/eca96d8/23ffbc5). See
+# reduction, precisely -- not a fixed "Pearson for mean tests, Spearman for
+# rank tests" recipe (wrong for rank tests). Every test's rho is actually a
+# Pearson correlation on a test-specific LINEARIZATION of the raw values --
+# identity for mean-type tests (whose influence function psi(y)=y-mu is
+# already linear, hence exactly effect-size-invariant), but a genuine
+# transform for rank-type tests, whose named/raw-Spearman recipe drifts with
+# effect size instead (see notes/omnibus_label_efficiency.html). See
 # _linearize_for_test for the dispatch and each _linearize_* function for
-# the actual recipe + validation provenance.
+# the actual recipe.
 #
 # design: the design each test implies, or None if the caller must say
 # ("within"/"between" both valid, e.g. ttest/anova_oneway paired vs
@@ -2064,16 +2063,13 @@ def _linearize_wilcoxon(conditions: dict) -> tuple[np.ndarray, np.ndarray]:
     reported here is taken against the very quantity the correction's own
     variance is computed on, rather than a re-derived lookalike.
 
-    Note this is deliberately NOT ``sign(d) * (2*F_{|D|}(|d|) - 1)``: that
-    expands to ``4*F_D(d) - sign(d) - 2``, which is not affine in
-    ``F_D(d)`` (the ``sign`` term survives) and is non-monotonic in ``d``,
-    returning about -1 just above zero and about +1 just below it. An
-    earlier version of this function used exactly that (borrowed from the
-    since-removed ``hajek_experimental`` path) and measured about 0.6x the
-    directly-measured ``Var(classical)/Var(PPI)``.
+    Deliberately not ``sign(d) * (2*F_{|D|}(|d|) - 1)``: that expands to
+    ``4*F_D(d) - sign(d) - 2``, which is not affine in ``F_D(d)`` (the
+    ``sign`` term survives) and is non-monotonic in ``d``, returning about
+    -1 just above zero and about +1 just below it.
 
-    Replaces the raw-Spearman-of-differences recipe, which drifts -25% by
-    d=2 (notes/omnibus_label_efficiency.html)."""
+    Replaces the raw-Spearman-of-differences recipe, which drifts with
+    effect size (see notes/omnibus_label_efficiency.html)."""
     from evalstats.ppi import _walsh_theta_h1_components
 
     names = list(conditions.keys())
@@ -2097,33 +2093,24 @@ def _linearize_mannwhitney(conditions: dict) -> tuple[np.ndarray, np.ndarray]:
 
     For item ``x_i`` in group A the score is ``F_Y(x_i)``, its mid-rank
     placement within group B; for item ``y_j`` in group B it is
-    ``P(X > y_j) = 1 - F_X(y_j)``. Built on the same searchsorted mid-rank
-    construction already used and tested in
-    ``evalstats.tests._p_x_gt_y_midrank`` for the point estimate itself,
-    extracted PER ITEM instead of summed to one ``P(X > Y)`` number.
+    ``P(X > y_j) = 1 - F_X(y_j)`` -- not ``-F_X(y_j)``: both have the same
+    spread, but their means differ by 1 (``theta - 1`` vs ``theta``), so
+    pooling would put the two halves a constant ~1.0 apart on both the
+    judge and human side, a lockstep offset that Pearson would then score
+    as agreement. Built on the same searchsorted mid-rank construction
+    already used and tested in ``evalstats.tests._p_x_gt_y_midrank`` for
+    the point estimate itself, extracted per item instead of summed to one
+    ``P(X > Y)`` number.
 
-    Both halves are then centered on their OWN mean before pooling. Two
-    reasons, and skipping either one was a real measured bug:
+    Both halves are then centered on their own mean before pooling: the
+    pooled correlation must be the within-group one, since any
+    between-group difference in mean placement is shared by judge and
+    humans and would again be counted as agreement -- the same fix as the
+    uncentered pooling corrected in ``_pooled_two_group_lambda``, and as
+    ``_linearize_mean``'s "between" branch.
 
-    1. Sign, not negation. An earlier version scored group B as
-       ``-F_X(y_j)`` rather than ``1 - F_X(y_j)``. Both have the same
-       spread, but their MEANS differ by 1 (``theta - 1`` vs ``theta``),
-       so pooling put the two halves a constant ~1.0 apart on both the
-       judge and human side -- a lockstep offset that both sides share and
-       that Pearson therefore scores as agreement. Measured effect: rho^2
-       inflated to ~0.92-0.98 and the predicted multiplier roughly 2x the
-       directly-measured ``Var(classical)/Var(PPI)``.
-    2. Per-group centering. Even with the correct sign, the pooled
-       correlation must be the WITHIN-group one: any between-group
-       difference in mean placement is shared by judge and humans and
-       would again be counted as agreement. This is the same failure mode
-       -- and the same fix -- as the uncentered pooling corrected in
-       ``_pooled_two_group_lambda``, and as ``_linearize_mean``'s
-       "between" branch, which centers each condition before pooling for
-       exactly this reason.
-
-    The raw-Spearman recipe this replaces drifts -13% by d=2
-    (notes/omnibus_label_efficiency.html).
+    Replaces the raw-Spearman recipe, which drifts with effect size (see
+    notes/omnibus_label_efficiency.html).
 
     Coarse-scale caveat (likert): placement values take only ~k distinct
     levels on a k-point scale, so the influence function loses most of its
@@ -2159,36 +2146,25 @@ def _linearize_mannwhitney(conditions: dict) -> tuple[np.ndarray, np.ndarray]:
 
 
 def _linearize_kruskal(conditions: dict) -> tuple[np.ndarray, np.ndarray]:
-    """Spearman of within-condition-CENTERED, pooled values -- the
+    """Spearman of within-condition-centered, pooled values -- the
     validated recipe for Kruskal-Wallis (notes/omnibus_label_efficiency.html
     Method 2): each condition's judge/human values centered on that
     condition's own mean (removing the between-condition location signal,
-    exactly like _linearize_mean's "between" branch), THEN pooled
-    (concatenated) across conditions, THEN rank-transformed as one combined
-    array -- NOT ranked within each condition separately first. Spearman
-    correlation of the pooled-then-globally-ranked residuals is, by
-    definition, Pearson correlation of their ranks; that's what's returned
-    here for the caller to correlate. (Ranking within each condition
-    separately before pooling -- an earlier, wrong version of this
-    function -- discards the very between-condition-relative information
-    centering-then-pooling is supposed to preserve, and empirically came
-    out suspiciously perfectly flat across effect sizes, unlike the note's
-    documented "mild drift" -- a sign it wasn't computing the validated
-    recipe.)
+    exactly like ``_linearize_mean``'s "between" branch), then pooled
+    (concatenated) across conditions, then rank-transformed as one combined
+    array -- not ranked within each condition separately first, which would
+    discard the between-condition-relative information centering-then-
+    pooling is meant to preserve. Spearman correlation of the
+    pooled-then-globally-ranked residuals is, by definition, Pearson
+    correlation of their ranks; that's what's returned here.
 
-    VALIDATED against the note's published figures: with its fixed judge
-    (within-condition rho^2 = 0.64) this returns 0.6151 where the note
-    reports 0.620 for the same recipe.
-
-    INHERITED CAVEAT, documented in the note and not fixed here: this
-    recipe is effect-invariant (flat at 0.6151 for d=0.5 and d=1.0) while
-    the TRUE implied rho^2 falls (0.606 -> 0.578 over that range), so it
-    runs mildly optimistic -- about 8% on N_eff at d=1.0 -- and more so
-    further out. Treat Kruskal-Wallis's number as a ceiling rather than a
-    point estimate when a large effect is expected. This is the same
-    rank-drift phenomenon that hits Friedman much harder, in mild form;
-    unlike Friedman (see :func:`_linearize_friedman`), no
-    doubly-centred/plug-in replacement for it has been validated."""
+    Inherited caveat, documented in the note and not fixed here: this
+    recipe is effect-invariant while the true implied rho^2 falls with
+    effect size, so it runs mildly optimistic -- treat Kruskal-Wallis's
+    number as a ceiling rather than a point estimate when a large effect is
+    expected. Same rank-drift phenomenon that hits Friedman harder (see
+    :func:`_linearize_friedman`), in mild form; no doubly-centred/plug-in
+    replacement for it has been validated."""
     from scipy.stats import rankdata
 
     judge_parts, human_parts = [], []
@@ -2210,21 +2186,11 @@ def _linearize_friedman(conditions: dict) -> tuple[np.ndarray, np.ndarray]:
     Friedman (notes/omnibus_label_efficiency.html Method 4): rank each
     participant's k conditions (row-wise) for judge and humans alike,
     subtract each condition's (column) mean rank, correlate the pooled
-    residuals. Emphatically NOT the average per-participant Spearman (an
-    earlier, wrong version of this function's design) -- that recipe moves
-    in the OPPOSITE direction from the truth as effect size grows (rises
-    while the truth falls), reaching +89% N_eff overstatement at k=5, d=1.0
-    in the note's measurements. The row-wise rank transform substitutes for
-    row-centering (ranks are already row-normalized by construction); only
-    the column (condition) mean needs explicit removal.
-
-    VALIDATED against the note's published figures: with its fixed judge
-    (within-condition rho^2 = 0.64, k=3) this returns 0.4106 / 0.3953 /
-    0.3628 at d = 0.0 / 0.5 / 1.0, against the note's 0.409 / 0.394 /
-    0.356 for the same recipe -- within 0.007 throughout, and correctly
-    FALLING with effect size, tracking the note's implied 0.422 / 0.388 /
-    0.348 rather than rising the way the naive average per-participant
-    Spearman does."""
+    residuals. Not the average per-participant Spearman -- that recipe
+    moves in the opposite direction from the truth as effect size grows
+    (rising while the truth falls). The row-wise rank transform substitutes
+    for row-centering (ranks are already row-normalized by construction);
+    only the column (condition) mean needs explicit removal."""
     from scipy.stats import rankdata
 
     names = list(conditions.keys())
@@ -2546,37 +2512,24 @@ def _attach_savings(metric: dict, N: int) -> dict:
     """Attach multiplier/n_eff to a correlation metric dict, using `N`
     (see :func:`_pair_total_n`) as the savings formula's total item count.
 
-    VALIDATED. With ``lam*`` the variance-minimizing PPI++ weight, the
-    algebra gives ``Var_min = (V_h/n_lab) * [1 - rho^2 * (n_unlab/N)]``,
-    i.e. exactly ``multiplier = 1/(1 - rho^2*(1 - n_lab/N))`` with ``rho``
-    the correlation of the two sides' INFLUENCE FUNCTIONS. Confirmed
-    numerically against a direct oracle-lambda simulation (no bootstrap,
-    N=1000, n_lab=200, 4000 reps): predicted/oracle multiplier ratios were
-    0.975 / 1.009 / 1.017 for wilcoxon and 0.987 / 1.008 / 0.993 for
-    mannwhitney at d = 0 / 0.3-0.5 / 1.0 -- within 1.7% and stable across
-    effect sizes.
+    With ``lam*`` the variance-minimizing PPI++ weight, the algebra gives
+    ``Var_min = (V_h/n_lab) * [1 - rho^2 * (n_unlab/N)]``, i.e. exactly
+    ``multiplier = 1/(1 - rho^2*(1 - n_lab/N))`` with ``rho`` the
+    correlation of the two sides' influence functions. The multiplier
+    depends on ``N`` and ``n_lab`` only through their ratio, so pooling
+    equal-sized groups preserves it exactly.
 
-    Note the ``N`` passed here cannot itself be a source of error: the
-    multiplier depends on ``N`` and ``n_lab`` only through their RATIO, and
-    pooling equal-sized groups preserves that ratio exactly (60/300 =
-    120/600). An earlier revision of this docstring blamed a measured
-    discrepancy on "N-aggregation"; that was wrong on both counts -- see
-    :func:`_linearize_mannwhitney` and :func:`_linearize_wilcoxon` for the
-    two real (now-fixed) bugs, which were in the linearizations.
-
-    ONE STANDING CAVEAT, and it is about the library's lambda, not this
-    formula: ``multiplier``/``n_eff`` are the ORACLE bound -- what is
+    One standing caveat, about the library's lambda rather than this
+    formula: ``multiplier``/``n_eff`` are the oracle bound -- what is
     achievable at the variance-minimizing lambda. ``evalstats.tests``
-    deliberately does not always use that lambda. In particular
-    ``wilcoxon(power_tune=True)`` evaluates the human term's variance under
-    H0 (sign-flip null variance) rather than plug-in, a deliberate
-    calibration trade documented in
-    ``evalstats.ppi._analytic_walsh_theta_correct``. That lambda is
-    intentionally sub-optimal, and drifts further from optimal as the true
-    effect moves away from H0 -- measured at n_lab=60, the realized
-    multiplier fell to ~1/1.17 of this bound at d=0 and ~1/1.74 at d=0.3.
-    So report these as "the efficiency this judge makes available", not as
-    a guarantee of what a particular corrected test will realize."""
+    deliberately does not always use that lambda: ``wilcoxon(power_tune=True)``
+    evaluates the human term's variance under H0 (sign-flip null variance)
+    rather than plug-in, a deliberate calibration trade documented in
+    ``evalstats.ppi._analytic_walsh_theta_correct``, which is intentionally
+    sub-optimal and drifts further from optimal as the true effect moves
+    away from H0. So report these as "the efficiency this judge makes
+    available", not as a guarantee of what a particular corrected test
+    will realize."""
     mult, n_eff = _n_eff(metric["estimate"], metric["n"], N)
     metric["N"] = N
     metric["multiplier"] = mult
@@ -2594,8 +2547,7 @@ def _judge_alignment_pairwise(
             "For a single condition, call judge_alignment(judge_scores, human_scores) "
             "with plain arrays instead."
         )
-    if selection not in _VALID_SELECTIONS:
-        raise ValueError(f"selection={selection!r} -- must be one of {_VALID_SELECTIONS}.")
+    _validate_and_warn_selection(selection, warn_stacklevel)
 
     resolved_design = design
     if test is not None:
@@ -2617,38 +2569,6 @@ def _judge_alignment_pairwise(
             "alone -- two conditions look the same positionally whether they're "
             "a paired comparison or two independent groups, and each needs "
             "different math."
-        )
-
-    if selection == "unknown":
-        warnings.warn(
-            "judge_alignment() was not told how the labeled subset was "
-            "selected (selection=). Every correction it and "
-            "compare(alignment=...) apply assumes the labeled items are a "
-            "random sample of the full item pool -- pass selection='random' "
-            "to confirm that's the case, or selection='manual'/'stratified' "
-            "if not, so this is a deliberate acknowledgment rather than an "
-            "unexamined default.",
-            UserWarning, stacklevel=warn_stacklevel,
-        )
-    elif selection == "manual":
-        warnings.warn(
-            "selection='manual': the labeled subset was NOT randomly "
-            "sampled. PPI/alignment correction assumes random sampling "
-            "(MCAR) to be valid -- with a manually-chosen subset, the "
-            "corrected estimates and CIs compare()/judge_alignment() report "
-            "may be miscalibrated, not just imprecise. Treat them as "
-            "informal unless the alignment set is re-sampled at random.",
-            UserWarning, stacklevel=warn_stacklevel,
-        )
-    elif selection == "stratified":
-        warnings.warn(
-            "selection='stratified': evalstats' current correction doesn't "
-            "account for stratification weights, so this is only valid if "
-            "each stratum was itself sampled uniformly at random and the "
-            "strata are otherwise ignorable for the metric being judged. "
-            "If items were hand-picked within strata, treat corrected "
-            "estimates as potentially biased, same as selection='manual'.",
-            UserWarning, stacklevel=warn_stacklevel,
         )
 
     names = list(conditions.keys())
