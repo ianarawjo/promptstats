@@ -1137,9 +1137,26 @@ def _prepare_paired_pairwise_rows(
     # paths and Nemenyi don't run through PPI, so they never get tagged).
     _ppi_tag = "PPI-" if getattr(bundle, "ppi_applied", False) else ""
 
+    # Binary paired data must not fall through to Wilcoxon signed-rank. A rank
+    # test on 0/1 scores is the thing _COMPARISON_METHODS_BINARY drops as
+    # unsound under that many ties, and evalstats already computes the right
+    # test for this cell -- it just was not being displayed. result.p_value
+    # carries McNemar's mid-p without PPI (see core/paired.py's bonett_price
+    # branch) and the PPI-corrected paired mean-difference test with it
+    # (_ppi_paired_bonett_price), which is the binary PPI path the paper
+    # validates. Both live on the "boot" source.
+    #
+    # Only when Romano-Wolf is NOT active: RW resamples its own p-values and
+    # legitimately replaces whatever base test would otherwise run, binary
+    # included.
+    _is_binary_paired = str(getattr(bundle, "resolved_data_kind", None)) == "binary"
+
     if p_value_method == "auto":
         if is_romano_wolf_active:
             eff_p_source, p_col_header = "boot", f"p ({_ppi_tag}RW)"
+        elif _is_binary_paired:
+            eff_p_source = "boot"
+            p_col_header = "p (PPI-paired-t)" if _ppi_tag else "p (mcnemar)"
         else:
             eff_p_source, p_col_header = "wsr", f"p ({_ppi_tag}wsr)"
     elif p_value_method == "boot":
@@ -1310,6 +1327,11 @@ def _prepare_paired_pairwise_rows(
                 p_value_method_label = "McNemar mid-p test"
             elif is_sign_pairwise:
                 p_value_method_label = "Paired sign test"
+            elif _is_binary_paired:
+                p_value_method_label = (
+                    f"{ppi_prefix}paired t-test (difference of proportions)"
+                    if ppi_prefix else "McNemar mid-p test"
+                )
             elif eff_p_source == "max_t":
                 p_value_method_label = f"{ppi_prefix}Max-T bootstrap"
             else:
