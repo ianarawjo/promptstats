@@ -640,20 +640,6 @@ def _ppi_two_sample(
     )
 
 
-def _p_x_gt_y_strict(x: np.ndarray, y: np.ndarray) -> float:
-    """Compute P(X > Y) exactly, counting ties as 0.
-
-    Uses sorting + binary search for O((n_x + n_y) log n_y) time and
-    O(n_y) extra memory, avoiding O(n_x * n_y) pairwise matrices.
-    """
-    if len(x) == 0 or len(y) == 0:
-        return 0.0
-
-    y_sorted = np.sort(y)
-    n_lt = np.searchsorted(y_sorted, x, side="left")
-    return float(n_lt.sum() / (len(x) * len(y)))
-
-
 def _p_x_gt_y_midrank(x: np.ndarray, y: np.ndarray) -> float:
     """Compute P(X > Y) + 0.5·P(X = Y) — the mid-rank (Wilcoxon-Mann-Whitney) convention.
 
@@ -1233,26 +1219,22 @@ def _ppi_kruskal_wallis_pairwise(
     #     nothing when labels are plentiful.
     #
     #   * an explicit all-zero-covariance guard. Every pairwise dominance
-    #     estimate can have (numerically) EXACTLY zero bootstrap variance
-    #     -- confirmed on real data whenever the labeled subsample
-    #     preserves a strict, deterministic group ordering (an exact
-    #     rank-split positive control: the labeled human-side theta is
+    #     estimate can have (numerically) EXACTLY zero bootstrap variance --
+    #     e.g. whenever the labeled subsample preserves a strict,
+    #     deterministic group ordering (the labeled human-side theta is
     #     1.0/0.0 on every possible resample, since resampling can't undo a
     #     strict ordering), combined with a small enough power-tuning
     #     lambda that the judge-side variance contribution also rounds to
     #     zero. np.linalg.pinv on an all-zero covariance returns an
     #     all-zero pseudo-inverse (it can't represent "infinite
-    #     precision"), silently collapsing wald_stat to 0 --
-    #     indistinguishable from "no information", even though zero
-    #     uncertainty around a nonzero effect is the most CONFIDENT result
-    #     a test can report. df then also collapsed to 0 and crashed this
-    #     function (ZeroDivisionError), silently swallowed by
-    #     cases/ppi_real.py's per-rep try/except and counted as "failed to
-    #     detect" -- which is what collapsed real-data kruskal power from
-    #     ~0.83 (uncorrected) to ~0.20 (corrected) on exactly these
-    #     strong-effect scenarios. The guard falls back to the same "check
-    #     the point estimate directly" idiom every other closed-form PPI
-    #     backend uses for an se<=0 degenerate case (e.g.
+    #     precision"), silently collapsing wald_stat to 0 -- indistinguishable
+    #     from "no information", even though zero uncertainty around a
+    #     nonzero effect is the most CONFIDENT result a test can report. df
+    #     then also collapses to 0, which without this guard crashes the
+    #     function (ZeroDivisionError) on exactly the strongest-effect
+    #     scenarios. The guard falls back to the same "check the point
+    #     estimate directly" idiom every other closed-form PPI backend uses
+    #     for an se<=0 degenerate case (e.g.
     #     evalstats.ppi._analytic_walsh_theta_correct).
     nu = sum(n_lab_per_group)
     wald_stat, df, wald_p = _kw_wald_from_vector(diff, cov, nu)
@@ -1264,14 +1246,13 @@ def _ppi_kruskal_wallis_pairwise(
     #
     # Pairwise post-hoc: the SAME test form the shipped PPI Mann-Whitney uses
     # (evalstats.ppi's analytic t on estimate/se, df = n_lab - 1), applied to
-    # the corrected theta_ab. Previously this was a bootstrap PERCENTILE
-    # p-value, 2*min(P(boot<=.5), P(boot>=.5)). That construction has no floor:
-    # when every resample lands on one side it returns EXACTLY 0, which then
-    # survives Holm or Bonferroni untouched (measured at 1.3% of null pairs at
-    # n_boot=200, roughly doubling the family-wise rate). It also made the
-    # post-hoc a different test from the one a reader would expect after a
-    # Kruskal-Wallis omnibus, and a different test from evalstats' own
-    # mannwhitney(). Both reasons point at the same fix.
+    # the corrected theta_ab -- not a bootstrap percentile p-value
+    # (2*min(P(boot<=.5), P(boot>=.5))), which has no floor: when every
+    # resample lands on one side it returns exactly 0, which then survives
+    # Holm or Bonferroni untouched and inflates the family-wise rate. It
+    # would also make the post-hoc a different test from the one a reader
+    # expects after a Kruskal-Wallis omnibus, and from evalstats' own
+    # mannwhitney().
     _se_pair = boots.std(axis=0, ddof=1)
     _df_pair = max(int(sum(n_lab_per_group)) - 1, 1)
     with np.errstate(divide="ignore", invalid="ignore"):
@@ -3017,35 +2998,21 @@ def _ppi_single_wilson(a: np.ndarray, a_lab: np.ndarray, alpha: float):
     # structure, which is exactly what Tango's score interval is built for.
     # The plug-in sigma2_rect/n_lab is estimated from however many discordant
     # items happen to be drawn, and when a judge is accurate and the base rate
-    # is extreme that count is tiny (n_lab=30 at a 0.08 flip rate on p=0.90
-    # data yields ~2). A draw with few discordant items produces BOTH an
-    # estimate pulled toward the judge AND a small sigma2_rect, so the error
-    # and the interval width are positively coupled and the interval
-    # under-covers -- one-sidedly, because the discordant count is skewed
-    # (measured at p=0.90: miss_low 0.003 vs miss_high 0.104 against 0.025
-    # nominal each, with the point estimate itself unbiased).
+    # is extreme that count can be tiny. A draw with few discordant items
+    # produces BOTH an estimate pulled toward the judge AND a small
+    # sigma2_rect, so the error and the interval width are positively
+    # coupled and the interval under-covers -- one-sidedly, because the
+    # discordant count is skewed.
     #
     # It fails WORSE as N grows, which is the counter-intuitive part: the
     # well-estimated sigma2_f/n_all term shrinks away, leaving the total
-    # variance dominated by the term estimated from ~2 events. Measured
-    # coverage at n_lab=30, flip 0.08, p=0.90: 0.953 at N=60 falling to 0.915
-    # at N=1000; worst case found was 0.757 (p=0.90, flip=0.05, N=2000).
-    #
-    # Resampling cannot fix this -- bootstrap_t (0.878) and bootstrap (0.840)
-    # were both WORSE than the plug-in, because ~2 observed events carry no
-    # tail to resample. Tango can, because it is parametric in the discordant
-    # counts rather than empirical. Validated over 40 configurations spanning
-    # p in [0.3, 0.95], flip in [0.05, 0.15], n_lab in {30, 100}, N in
-    # {200, 2000}: not materially worse in ANY cell, and pooled by observed
-    # discordant count it repairs precisely the broken regime --
-    #
-    #     discordant items   plug-in    Tango
-    #                 0-4     0.8753   0.9529
-    #                 5-9     0.9568   0.9524
-    #                  10+      ~0.95    ~0.95
-    #
-    # Width cost is nil where the plug-in already worked (ratio 0.94-1.02) and
-    # 1.1-1.3x only in the cells it was failing.
+    # variance dominated by the term estimated from very few events.
+    # Resampling cannot fix this -- bootstrap variants were also worse than
+    # the plug-in, since a handful of observed events carry no tail to
+    # resample. Tango can, because it is parametric in the discordant counts
+    # rather than empirical: it is not materially worse anywhere in the
+    # regimes tested and specifically repairs the sparse-discordance case,
+    # at essentially no width cost where the plug-in already worked.
     #
     # The two terms are independent (disjoint samples), so Tango's ASYMMETRIC
     # half-widths are combined with the unlabeled term's normal half-width in
@@ -3096,15 +3063,13 @@ def _ppi_single_wilson(a: np.ndarray, a_lab: np.ndarray, alpha: float):
 
         # Tango repairs most of the damage but cannot manufacture information
         # that is not there. Coverage here is governed by the COUNT of
-        # discordant items, not by n_lab or judge accuracy separately -- both
-        # sweeps collapse onto the same curve (measured, plug-in: 2.4 events
-        # -> 0.899, 4.8 -> 0.931, 9.5 -> 0.946, 20 -> 0.950; and holding
-        # n_lab=30 while raising the flip rate traces the same path). Below
-        # roughly 10 discordant items the estimate is a near-degenerate
-        # discrete statistic -- at n_lab=30, flip 0.08, p=0.95 there are ~2 --
-        # and residual under-coverage persists for EVERY construction tried
-        # (plug-in, bootstrap, bootstrap-t, Wilson-union, Tango). Say so
-        # rather than return a confidently wrong interval.
+        # discordant items, not by n_lab or judge accuracy separately --
+        # raising either one only helps insofar as it raises the discordant
+        # count. Below roughly 10 discordant items the estimate is a
+        # near-degenerate discrete statistic, and residual under-coverage
+        # persists for EVERY construction tried (plug-in, bootstrap,
+        # bootstrap-t, Wilson-union, Tango). Say so rather than return a
+        # confidently wrong interval.
         if _n_disc < _PPI_MIN_DISCORDANT:
             warnings.warn(
                 f"PPI binary CI: only {_n_disc} of {n_lab} labeled items disagree with "
@@ -3158,8 +3123,7 @@ def _ppi_single_t_interval(a: np.ndarray, a_lab: np.ndarray, alpha: float, power
     this module, a single-arm mean estimand has no second group for a
     label-selection MNAR mechanism's point-estimate bias to cancel against
     (see :func:`evalstats.ppi._analytic_mean_point_se`'s
-    ``label_shift_robust`` docstring for the full mechanism and
-    simulations/out/results_why_ppi_shrink_1_over_0.md's Addendum 34).
+    ``label_shift_robust`` docstring for the full mechanism).
     """
     from evalstats.ppi import _analytic_mean_correct
 
@@ -3960,20 +3924,17 @@ def _ppi_anova_repeated_f_stat(
     np.outer(r_term, r_term)*Var(lambda_hat), since r_term is now a
     k-vector here).
 
-    Validated via simulation (see
-    simulations/out/results_why_ppi_shrink_1_over_0.md's repeated-ANOVA
-    addendum): Type-I stays controlled (elevated at n_lab~15-20, converging
-    to the fixed-lambda baseline by n_lab~40-60, the same small-sample
-    pattern documented for every other adaptively-shrunk site in this
-    codebase), with large power gains for poor/uninformative judges.
+    Validated via simulation: Type-I stays controlled (mildly elevated at
+    small n_lab, converging to the fixed-lambda baseline as n_lab grows --
+    the same small-sample pattern documented for every other adaptively-
+    shrunk site in this codebase), with large power gains for poor/
+    uninformative judges.
 
     Shares :func:`_ppi_friedman_f_stat`'s ``_repeated_anova_lambda_raw``/
-    ``_repeated_anova_lambda_replicates`` machinery and, as of Addendum
-    30, its closed-form variance-inflation fix
-    (:func:`evalstats.ppi._shrunk_lambda_variance`) -- see that
-    function's docstring for the mild residual power_tune=True inflation
-    this partially (not fully) addresses, and why an n_lab-adaptive
-    default switch was investigated and found not warranted."""
+    ``_repeated_anova_lambda_replicates`` machinery and its closed-form
+    variance-inflation fix (:func:`evalstats.ppi._shrunk_lambda_variance`)
+    -- see that function's docstring for the mild residual power_tune=True
+    inflation this partially (not fully) addresses."""
     n_subjects = len(groups[0])
     labels_mat = np.column_stack(groups_lab)
     overlap = np.all(~np.isnan(labels_mat), axis=1)
@@ -4255,33 +4216,21 @@ def _ppi_friedman_f_stat(
     Known, open (partially mitigated) limitation under ``power_tune=True``
     (MCAR labeling): a mild, broad-based Type-I inflation at small-to-
     moderate ``n_lab``, root-caused to the same same-sample lambda/point-
-    estimate coupling that caused wilcoxon()'s much larger inflation
-    (Addendum 28) -- but here the failure mode is a mild mean-level shift
-    in ``f_corr``'s expectation, NOT a heavy tail like wilcoxon's, so
-    wilcoxon's cross-fitting fix (and a joint-bootstrap variant, tried as
-    a second candidate) do not transfer -- both were validated (ground-
-    truth Monte Carlo variance checks plus rejection-rate sweeps) to make
-    calibration WORSE, not better, and were rejected. What DOES help: the
+    estimate coupling that causes wilcoxon()'s much larger inflation -- but
+    here the failure mode is a mild mean-level shift in ``f_corr``'s
+    expectation, not a heavy tail like wilcoxon's, so wilcoxon's cross-
+    fitting fix (and a joint-bootstrap variant) don't transfer; both were
+    found to make calibration worse and were rejected. What does help: the
     variance-inflation term now uses :func:`evalstats.ppi.
     _shrunk_lambda_variance`'s closed-form correction for the adaptive
-    shrinkage TARGET's own sampling uncertainty (previously unaccounted
-    for -- the prior term implicitly assumed no shrinkage, i.e. ``w=1``),
-    which closes roughly 20-30% of the mean Type-I gap above nominal alpha
-    (139-scenario sweep: mean 0.0542->0.0530, max 0.0767->0.0733) with no
-    meaningful power cost -- real but partial, not a full fix. An n_lab-
-    adaptive default switch (using ``power_tune=False`` below some n_lab
-    threshold) was also investigated as a follow-up and found NOT
-    warranted: a controlled, deconfounded sweep across n_lab~15-120 (two
-    independent scenario families, 2500 reps/point) found no reliable
-    n_lab regime where ``power_tune=True`` becomes calibration-superior to
-    ``power_tune=False`` -- the one apparent crossover point did not
-    replicate at the same n_lab in the second family, consistent with
-    Monte Carlo noise rather than a real effect -- so switching would
-    effectively mean "always use ``power_tune=False``," forfeiting
-    ``power_tune``'s substantial documented power advantage for no
-    reliable calibration gain. See simulations/out/
-    results_why_ppi_shrink_1_over_0.md's Addendum 30 for the full
-    investigation (four candidate fixes tried, one adopted).
+    shrinkage target's own sampling uncertainty (the prior term implicitly
+    assumed no shrinkage), which closes part of the Type-I gap above
+    nominal alpha with no meaningful power cost -- real but partial, not a
+    full fix. An n_lab-adaptive default switch (``power_tune=False`` below
+    some threshold) was also investigated and found not warranted: no
+    n_lab regime reliably favors ``power_tune=False`` on calibration, so
+    switching would just forfeit ``power_tune``'s power advantage for no
+    reliable gain.
     """
     n_subjects = len(groups[0])
     labels_mat = np.column_stack(groups_lab)
@@ -5431,65 +5380,40 @@ def kruskalwallis(
     method : {"influence", "influence_logo", "influence_floor", "global",
         "mnar_experimental", "rowsum", "rowsum_labeled", "twopart", "eigengap"}
         Which PPI correction to use for the pairwise-dominance Wald test
-        (default ``"influence"``). ``"influence_logo"`` and ``"influence_floor"``
-        are leave-one-group-out and floored variants of the default influence
-        covariance; ``"twopart"`` and ``"eigengap"`` are alternative covariance
-        constructions explored alongside ``"rowsum"`` -- none of the three
-        (or ``"global"``/``"mnar_experimental"``) is the recommended choice,
-        kept for comparison in ``simulations/harness`` (see
-        :func:`_kw_candidate_from_pairwise`).
+        (default ``"influence"``).
 
-        ``"influence"`` (:func:`_kw_influence_cov`) is the default: the
-        null-structured influence covariance, which has rank k-1 by
-        construction and so yields df = k-1 with no rcond or eigengap rule.
-        It replaced ``"global"`` as the default because the bootstrap Wald
-        covariance read df off ``rank(Sigma_hat)``, counting C(k,2)
-        directions when only k-1 carry signal, and was progressively
-        conservative in k (Type-I .028/.004/.000 at k = 3/5/7). Measured
-        after the change: .0273 -> .0522 over 2,046 MCAR null cells, median
-        cell exactly .050; real judge data .035 -> .056; power at d=0.3
-        .688 -> .890.
+        ``"influence"`` (:func:`_kw_influence_cov`) is the recommended
+        default: a null-structured influence covariance with rank k-1 by
+        construction, so df = k-1 needs no rcond or eigengap rule.
+        ``"influence_logo"``/``"influence_floor"`` are leave-one-group-out
+        and floored variants of it.
 
-        ``"global"`` is the previous default, kept for reproducing
-        pre-change results; ``"mnar_experimental"`` trades calibration under
-        non-uniform labeling for extra variance; ``"rowsum"``/
-        ``"rowsum_labeled"`` are EXPERIMENTAL and change *which linear
-        functional* of the corrected pairwise vector is tested rather than
-        how it is corrected -- see
-        :func:`_ppi_kruskal_wallis_rowsum`.
-
-        ``"global"`` (:func:`_ppi_kruskal_wallis_pairwise`) applies a
-        single rectifier per pair -- simple, but can be miscalibrated
-        under labeling that's non-uniform with respect to score combined
-        with real judge bias and coarse/discrete scales.
+        ``"global"`` (:func:`_ppi_kruskal_wallis_pairwise`) is the previous
+        default: a single rectifier per pair, with df instead derived from
+        the bootstrap covariance's own rank -- kept for reproducing
+        pre-change results.
 
         ``"mnar_experimental"`` (:func:`_ppi_kruskal_wallis_pairwise_mnar_experimental`)
-        fixes that with a per-group, per-score-bin local rectifier instead
-        (see that function's docstring), at the cost of real calibration
-        under ordinary, correctly-random (MCAR) labeling -- the same
-        MCAR-vs-MNAR tradeoff ``mannwhitney``'s equivalent fix has. Since
-        this package's PPI correction generally assumes labels are sampled
-        uniformly at random (see :func:`evalstats.ppi.correct`'s
-        docstring) and treats MNAR labeling as an out-of-scope, documented
-        limitation, paying the MCAR cost for MNAR robustness is the wrong
-        trade for the default. ``"mnar_experimental"`` remains available
-        for anyone deliberately studying the MNAR-robustness question --
-        see ``simulations/harness/cases/pvalues.py --mode ppi`` (methods
-        ``kruskal`` vs ``kruskal_mnar_experimental``) for the calibration
-        study.
+        uses a per-group, per-score-bin local rectifier for MNAR robustness,
+        at the cost of calibration under ordinary random (MCAR) labeling --
+        the same tradeoff ``mannwhitney``'s equivalent fix has, and not the
+        default for the same reason (this package's PPI correction assumes
+        MCAR labeling by default; see :func:`evalstats.ppi.correct`'s
+        docstring).
 
-        ``"rowsum"`` (:func:`_ppi_kruskal_wallis_rowsum`) is the PPI
-        correction of the *classical* Kruskal-Wallis statistic rather than
-        a replacement for it. It takes the corrected pairwise vector and
-        its covariance from ``"global"`` unchanged and Wald-tests only
-        their (k-1)-dimensional weighted row-sum projection -- exactly the
-        part of the pairwise vector classical KW's mean pooled ranks are an
-        affine function of. Fewer degrees of freedom, so slightly more
-        power on ordered-location alternatives; structurally blind to
-        non-transitive (cyclic) dominance, where the row sums cancel, in
-        precisely the way classical KW is. ``"rowsum_labeled"`` is the same
-        test with the projection weighted by labeled counts instead of full
-        group sizes (identical to ``"rowsum"`` under a balanced design).
+        ``"rowsum"``/``"rowsum_labeled"`` (:func:`_ppi_kruskal_wallis_rowsum`)
+        Wald-test only the (k-1)-dimensional weighted row-sum projection of
+        the corrected pairwise vector, rather than the full vector -- the
+        part classical Kruskal-Wallis's pooled ranks are an affine function
+        of. Slightly more power on ordered-location alternatives;
+        structurally blind to non-transitive (cyclic) dominance, in the same
+        way classical KW is. ``"rowsum_labeled"`` weights the projection by
+        labeled counts instead of full group sizes.
+
+        ``"twopart"``/``"eigengap"`` (:func:`_kw_candidate_from_pairwise`)
+        are alternative covariance constructions explored alongside
+        ``"rowsum"``; none of the three is the recommended choice, kept for
+        comparison in ``simulations/harness``.
 
         None of these affects ``corrected_estimate`` (the scalar effect size
         from :func:`_ppi_kruskal_wallis`), which always uses the
