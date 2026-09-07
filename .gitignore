@@ -53,3 +53,10 @@ simulations/papers
 # over GitHub's 100 MB per-file hard limit, which would reject any push
 # carrying it. Findings live in the package docstrings and notes/, not here.
 simulations/kw_rowsum/
+
+# CHI supplementary material: scenario scripts, their bundled data, and the
+# README that ships with them. Untracked like the paper source, since it is
+# submission material rather than part of the package. The ELLIPSE-derived
+# data in supplementary/data/ellipse/ is CC BY-NC-SA 4.0 and should be
+# redistributed only with the supplement.
+supplementary/
