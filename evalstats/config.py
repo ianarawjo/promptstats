@@ -24,6 +24,18 @@ GRADIENT_CI_ALPHAS: tuple[float, ...] = (0.32, 0.10, 0.05, 0.01)
 # CLI (cli.py), before any analysis runs.
 MIN_SAMPLE_FLOOR: int = 15
 
+# Default seed for every resampling step downstream of compare(): bootstrap
+# CIs, the PPI bootstrap, permutation nulls. Fixed so that the same input
+# gives the same output -- a user passing no rng= reasonably expects a
+# deterministic answer, and before this the PPI omnibus p wandered in the
+# third decimal between identical calls (sd 0.0025 on p=0.388 over 12 runs).
+#
+# The trade this makes: Monte-Carlo variability is now invisible unless asked
+# for. A p-value sitting right at alpha is still seed-dependent; it just looks
+# stable. Pass rng=None explicitly for a fresh nondeterministic draw per call,
+# or sweep rng=0,1,2,... to see the spread.
+DEFAULT_RNG_SEED: int = 37
+
 
 def supports_ansi_color() -> bool:
     """Whether ANSI color escape codes should be emitted for console output.

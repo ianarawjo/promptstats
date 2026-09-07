@@ -333,8 +333,12 @@ def analyze(
     ImportError
         If ``method='lmm'`` and the selected backend is not installed.
     """
-    if rng is None:
-        rng = np.random.default_rng()
+    # Normalize once at the funnel: callers may pass an int seed, None, or a
+    # Generator, and the engines below this point are inconsistent about which
+    # they accept (mixed_effects and parts of resampling assume a Generator).
+    # compare() now defaults rng to an int seed, so this is the single place
+    # that has to turn it into something every engine can use.
+    rng = np.random.default_rng(rng)
     
     if ci is None:
         ci = 1.0 - get_alpha_ci()

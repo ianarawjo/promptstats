@@ -2056,6 +2056,11 @@ def lmm_analyze(
     ValueError
         If ``backend`` is not ``'statsmodels'`` or ``'pymer4'``.
     """
+    # Normalize as every other engine entry point does (unpaired.py,
+    # resampling.py): callers may pass an int seed, None, or a Generator.
+    # This path previously only ever saw None or a Generator because compare()
+    # left rng unset by default; it now defaults to an int seed.
+    rng = np.random.default_rng(rng)
     if backend not in ("statsmodels", "pymer4"):
         raise ValueError(f"backend must be 'statsmodels' or 'pymer4', got {backend!r}")
 

@@ -1733,6 +1733,47 @@ def _judge_alignment_core(
     )
 
 
+def _resolve_per_condition_col(evaldata, df, factors) -> Optional[str]:
+    """Pick the column whose per-condition alignment breakdown to report.
+
+    In order: an explicit ``factors=``, the "model" role column, then the sole
+    factor column. Raises with two or more factor columns and no "model" role,
+    since there is then no single right grouping to pick.
+    """
+    if factors is not None:
+        if isinstance(factors, (list, tuple)):
+            if len(factors) != 1:
+                raise ValueError(
+                    "judge_alignment(factors=...) takes a single column name; "
+                    f"got {list(factors)!r}."
+                )
+            factors = factors[0]
+        if factors not in df.columns:
+            raise ValueError(
+                f"factors='{factors}' is not a column in this data. "
+                f"Available columns: {list(df.columns)}"
+            )
+        return factors
+
+    model_col = evaldata._col.get("model")
+    if model_col is not None:
+        return model_col
+
+    factor_cols = [c for c in (getattr(evaldata, "_factor_cols", None) or [])
+                   if c in df.columns]
+    if len(factor_cols) == 1:
+        return factor_cols[0]
+    if len(factor_cols) > 1:
+        raise ValueError(
+            "This data has more than one factor column "
+            f"({', '.join(repr(c) for c in factor_cols)}) and no 'model' role, so "
+            "there is no single grouping to report per-condition alignment over. "
+            "Pass the one you are comparing, e.g. "
+            f"judge_alignment(..., factors='{factor_cols[0]}')."
+        )
+    return None
+
+
 def _judge_alignment_from_evaldata(
     evaldata,
     *,
@@ -1741,6 +1782,7 @@ def _judge_alignment_from_evaldata(
     alpha: float,
     selection: str = "unknown",
     ci: bool = True,
+    factors=None,
 ) -> AlignmentResult:
     df = evaldata._df
 
@@ -1788,16 +1830,18 @@ def _judge_alignment_from_evaldata(
     # index (or unique per row), which the numeric-covariate check would
     # otherwise happily test, redundantly rediscovering (in a noisier form)
     # exactly what the position-based label-contiguity check already covers.
+    group_col = _resolve_per_condition_col(evaldata, df, factors)
+
     structural_cols = {
-        c for c in (evaldata._col.get("model"), evaldata._col.get("item"), evaldata._col.get("run"))
+        c for c in (evaldata._col.get("model"), evaldata._col.get("item"),
+                    evaldata._col.get("run"), group_col)
         if c is not None
     }
 
-    model_col = evaldata._col.get("model")
     per_condition_metrics = None
-    if model_col is not None:
+    if group_col is not None:
         per_condition_metrics = _compute_per_condition_alignment(
-            df, labeled_mask, model_col, llm_metric, human_groundtruth, score_type,
+            df, labeled_mask, group_col, llm_metric, human_groundtruth, score_type,
             alpha=alpha,
         )
 
@@ -2594,11 +2638,16 @@ def judge_alignment(
     alpha: float = 0.05,
     selection: str = "unknown",
     ci: bool = True,
+    factors=None,
 ) -> "AlignmentResult | PairwiseAlignmentResult":
     """Validate how well an LLM judge aligns with human graders.
 
     Parameters
     ----------
+    factors : str, optional
+        Column to break the alignment down by for the per-condition report.
+        Defaults to the ``model`` role column, then to the sole factor column.
+        Required when the data has more than one factor and no ``model`` role.
     ci : bool, default True
         Whether to bootstrap confidence intervals for the alignment metrics.
         ``ci=False`` returns the point estimates with NaN bounds and skips
@@ -2783,7 +2832,7 @@ def judge_alignment(
             )
         return _judge_alignment_from_evaldata(
             evaldata, llm_metric=llm_metric, human_groundtruth=human_groundtruth, alpha=alpha,
-            selection=selection, ci=ci,
+            selection=selection, ci=ci, factors=factors,
         )
 
     if human_scores is None:

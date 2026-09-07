@@ -18,7 +18,8 @@ from scipy.stats import norm as _scipy_norm
 
 from evalstats.loader import EvalResults, EvalLoadError, load_from, _scores_dict_to_df
 from evalstats.io import from_dataframe
-from evalstats.config import get_alpha_ci, GRADIENT_CI_ALPHAS, MIN_SAMPLE_FLOOR
+from evalstats.config import (get_alpha_ci, GRADIENT_CI_ALPHAS, MIN_SAMPLE_FLOOR,
+                              DEFAULT_RNG_SEED)
 from evalstats.core.router import analyze, analyze_factorial
 from evalstats.core.bundles import AnalysisBundle, MultiModelBundle, AnalysisResult
 from evalstats.core.design import detect_paired
@@ -59,6 +60,7 @@ class ComparisonResult:
         _mmb_view: Literal["model_level", "template_level", "cross_model"] = "model_level",
         min_meaningful_diff: Optional[float] = None,
         show_rank_probabilities: bool = False,
+        rng_seed: Optional[int] = None,
     ):
         self._analysis = analysis
         self._factors = factors
@@ -68,6 +70,12 @@ class ComparisonResult:
         self._df = filtered_df
         self._mmb_view = _mmb_view  # which MultiModelBundle view is primary
         self._min_meaningful_diff = min_meaningful_diff
+        # The integer seed every resampling step ran under, when knowable. None
+        # when the caller passed a Generator (whose seed cannot be recovered)
+        # or rng=None to opt out. Reported in the summary so a stable-looking
+        # number is never mistaken for a seed-independent one -- same contract
+        # as GroupComparisonResult.rng_seed on the unpaired path.
+        self.rng_seed = rng_seed
         self._variance_components: Optional[dict] = None  # set by MC alignment loop
         self._pareto: Optional[dict] = None  # set by _run_pareto_if_needed when secondary_metric= is passed
         # Bootstrap P(Best)/E[Rank] output is opt-in, not opt-out: it reads as
@@ -127,6 +135,7 @@ class ComparisonResult:
         item_singular, item_plural = _factor_item_labels(self._factors)
         print_analysis_summary(
             self._analysis,
+            rng_seed=self.rng_seed,
             top_pairwise=top_pairwise,
             style=style,
             p_value_method=pvm,
@@ -487,6 +496,7 @@ class ComparisonResult:
             _mmb_view=view_map[factor],
             min_meaningful_diff=self._min_meaningful_diff,
             show_rank_probabilities=self._show_rank_probabilities,
+            rng_seed=self.rng_seed,
         )
 
     @property
@@ -1236,6 +1246,18 @@ def compare(
 
     # ── split kwargs into column filters vs. engine kwargs ────────────────────
     df, engine_kwargs = _apply_kwarg_filters(df, kwargs, _ANALYZE_PARAMS)
+    # Reproducible by default. Every downstream engine reads its generator from
+    # engine_kwargs["rng"], so seeding once here covers the paired, unpaired,
+    # multi-run and PPI paths alike. A caller who passes rng= explicitly keeps
+    # their value; a caller who passes rng=None explicitly opts back in to a
+    # fresh nondeterministic draw, which is why this tests key presence rather
+    # than truthiness.
+    if "rng" not in engine_kwargs:
+        engine_kwargs["rng"] = DEFAULT_RNG_SEED
+    _rng_seed_used = (
+        int(engine_kwargs["rng"])
+        if isinstance(engine_kwargs["rng"], (int, np.integer)) else None
+    )
 
     # ── set CI level from alpha ───────────────────────────────────────────────
     ci_level = 1.0 - alpha
@@ -1377,6 +1399,8 @@ def compare(
                     n_boot=engine_kwargs.get("n_bootstrap", 2000),
                     rng=engine_kwargs.get("rng"),
                     score_range=engine_kwargs.get("score_range"),
+                    eval_type=engine_kwargs.get("eval_type"),
+                    correction=engine_kwargs.get("correction"),
                     p_values=_up_p_values, omnibus=_up_omnibus,
                     secondary_metric=secondary_metric,
                 )
@@ -1443,6 +1467,7 @@ def compare(
             _mmb_view="model_level",
             min_meaningful_diff=min_meaningful_diff,
             show_rank_probabilities=show_rank_probabilities,
+            rng_seed=_rng_seed_used,
         )
         _run_judge_alignment_if_needed(
             cr, alignment=alignment, metric_col=metric_col, n_mc=n_mc,
@@ -1497,6 +1522,7 @@ def compare(
             _mmb_view="template_level",
             min_meaningful_diff=min_meaningful_diff,
             show_rank_probabilities=show_rank_probabilities,
+            rng_seed=_rng_seed_used,
         )
         _run_judge_alignment_if_needed(
             cr, alignment=alignment, metric_col=metric_col, n_mc=n_mc,
@@ -1534,6 +1560,7 @@ def compare(
             filtered_df=df,
             min_meaningful_diff=min_meaningful_diff,
             show_rank_probabilities=show_rank_probabilities,
+            rng_seed=_rng_seed_used,
         )
         _run_judge_alignment_if_needed(
             cr, alignment=alignment, metric_col=metric_col, n_mc=n_mc,
@@ -1588,6 +1615,7 @@ def compare(
             _mmb_view="model_level",
             min_meaningful_diff=min_meaningful_diff,
             show_rank_probabilities=show_rank_probabilities,
+            rng_seed=_rng_seed_used,
         )
 
     # ── path D: factorial (multiple factors → LMM) ────────────────────────────
@@ -1638,6 +1666,7 @@ def compare(
             filtered_df=df,
             min_meaningful_diff=min_meaningful_diff,
             show_rank_probabilities=show_rank_probabilities,
+            rng_seed=_rng_seed_used,
         )
 
     raise EvalLoadError(

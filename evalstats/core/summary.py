@@ -201,6 +201,20 @@ def _mcc_interpretation(mcc: float) -> str:
 # Public entry point
 # ---------------------------------------------------------------------------
 
+_SEED_UNSET = object()
+
+
+def _seed_note(rng_seed) -> str:
+    """The ` | seed: N` suffix for a summary's metadata line.
+
+    Empty when the caller didn't supply one at all (older call sites, direct
+    print_analysis_summary() users), so nothing changes for them.
+    """
+    if rng_seed is _SEED_UNSET:
+        return ""
+    return f" | seed: {rng_seed}" if rng_seed is not None else " | seed: none (varies per call)"
+
+
 def print_analysis_summary(
     analysis: Union[
         AnalysisBundle,
@@ -219,6 +233,7 @@ def print_analysis_summary(
     item_plural: str = "templates",
     show_rank_probabilities: bool = False,
     pareto: Optional[dict] = None,
+    rng_seed: Optional[int] = _SEED_UNSET,
     metric: Optional[str] = None,
 ) -> None:
     """Print a concise console summary of analyze() results.
@@ -240,6 +255,7 @@ def print_analysis_summary(
     if isinstance(analysis, MultiModelBundle):
         _print_multi_model_summary(
             analysis,
+            rng_seed=rng_seed,
             top_pairwise=top_pairwise,
             line_width=line_width,
             pairwise_sort=pairwise_sort,
@@ -252,6 +268,7 @@ def print_analysis_summary(
     if isinstance(analysis, AnalysisBundle):
         _print_bundle_summary(
             analysis,
+            rng_seed=rng_seed,
             top_pairwise=top_pairwise,
             line_width=line_width,
             pairwise_sort=pairwise_sort,
@@ -271,6 +288,7 @@ def print_analysis_summary(
         if isinstance(bundle, MultiModelBundle):
             _print_multi_model_summary(
                 bundle,
+                rng_seed=rng_seed,
                 top_pairwise=top_pairwise,
                 line_width=line_width,
                 pairwise_sort=pairwise_sort,
@@ -281,6 +299,7 @@ def print_analysis_summary(
         else:
             _print_bundle_summary(
                 bundle,
+                rng_seed=rng_seed,
                 top_pairwise=top_pairwise,
                 line_width=line_width,
                 pairwise_sort=pairwise_sort,
@@ -627,6 +646,7 @@ def _display_order(bundle) -> "np.ndarray":
 def _print_multi_model_summary(
     bundle: MultiModelBundle,
     *,
+    rng_seed=_SEED_UNSET,
     top_pairwise: int = None,
     line_width: int,
     pairwise_sort: Literal["grouped", "significance"] = "grouped",
@@ -641,6 +661,7 @@ def _print_multi_model_summary(
         f"Templates: {bundle.benchmark.n_templates} | "
         f"Inputs: {bundle.benchmark.n_inputs}"
         + (f" | Runs: {bundle.benchmark.n_runs}" if bundle.benchmark.n_runs > 1 else "")
+        + _seed_note(rng_seed)
     )
     model_str = ", ".join(bundle.benchmark.model_labels)
     print(f"Models: {model_str}")
@@ -1501,8 +1522,23 @@ def _prepare_unpaired_pairwise_rows(
             )
 
     def _footer(_rows: list[dict], _max_pairs: int) -> None:
+        _line1 = [f"CI method: {ci_method}"] if ci_method else []
+        if _line1:
+            if show_p and pairwise_test_name:
+                _line1.append(f"p-value method: {ppi_prefix}{pairwise_test_name}")
+            _line1.append(f"α={result.alpha:g}")
+            print(f"{_DIM}  {'  |  '.join(_line1)}{_RESET}")
+            if n_pairs > 1:
+                _line2 = [f"Simultaneous CI method: {_pretty_correction(result.ci_correction)}"]
+                if show_p:
+                    _line2.append(
+                        "FWER correction for p-values: "
+                        f"{_pretty_correction(result.pvalue_correction)}"
+                    )
+                print(f"{_DIM}  {'  |  '.join(_line2)}{_RESET}")
         if show_p and pairwise_test_name:
-            corr_note = f"{result.pvalue_correction}-corrected" if n_pairs > 1 else "uncorrected, single comparison"
+            corr_note = (f"{result.pvalue_correction}-corrected" if n_pairs > 1
+                         else "uncorrected, single comparison")
             print(f"{_DIM}  {p_col_header} = {ppi_prefix}{pairwise_test_name} ({corr_note}){_RESET}")
         _print_pairwise_efficiency_note(_rows, result)
         if n_pairs > 1 and show_p:
@@ -1533,13 +1569,12 @@ def _prepare_unpaired_pairwise_rows(
         )
 
     label_width = min(24, max(8, max((len(g) for g in result.labels), default=8)))
-    correction_note = ""
-    if n_pairs > 1:
-        correction_note = f", {result.ci_correction} CI" + (
-            f"/{result.pvalue_correction} p (family of {n_pairs})" if show_p else ""
-        )
+    ci_method = getattr(result, "pairwise_ci_method", None)
     meta = {
-        "section_header": f"--- Pairwise Comparisons ({_FAMILY_DISPLAY_UNPAIRED[result.family]}{correction_note}) ---",
+        "section_header": (
+            f"--- Pairwise Comparisons ({ci_method} CIs) ---" if ci_method
+            else f"--- Pairwise Comparisons ({_FAMILY_DISPLAY_UNPAIRED[result.family]}) ---"
+        ),
         "pair_stat_label": pair_stat_label,
         "pair_item_col_width": label_width,
         "effect_label": "Left - Right",
@@ -1943,6 +1978,7 @@ def _print_ppi_banner() -> None:
 def _print_bundle_summary(
     bundle: AnalysisBundle,
     *,
+    rng_seed=_SEED_UNSET,
     top_pairwise: int = None,
     line_width: int,
     item_singular: str = "template",
@@ -1970,6 +2006,7 @@ def _print_bundle_summary(
         f"{item_plural_title}: {bundle.benchmark.n_templates} | "
         f"Inputs: {bundle.benchmark.n_inputs}"
         + (f" | Runs: {n_runs}" if n_runs > 1 else "")
+        + _seed_note(rng_seed)
     )
     print()
 
@@ -3928,8 +3965,12 @@ def print_group_comparison_summary(result: "GroupComparisonResult", *, style: st
           f"(design=unpaired; factor={result.factor_col!r}, metric={result.metric_col!r})")
     item_note = " (synthetic -- no item column found; each row is its own item)" if result.item_col_synthetic else ""
     print(f"Item column: {result.item_col!r}{item_note}")
+    # Seed on the existing metadata line rather than its own: it matters for
+    # reproducing a number, but it is not a finding.
+    _seed = getattr(result, "rng_seed", None)
+    seed_note = f"  |  seed: {_seed}" if _seed is not None else "  |  seed: none (varies per call)"
     print(f"Groups: {len(result.groups)}  |  Score type: {result.score_type}  |  "
-          f"Family: {_FAMILY_DISPLAY_UNPAIRED[result.family]}")
+          f"Family: {_FAMILY_DISPLAY_UNPAIRED[result.family]}{seed_note}")
     print()
 
     if result.ppi_applied:
