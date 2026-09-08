@@ -730,6 +730,12 @@ def _print_multi_model_summary(
             )
 
     print()
+    if bundle.benchmark.n_templates <= 1:
+        # Every "model/template pair" is just a model, so the matrix, the
+        # All-N listing and the pair leaderboard below restate the
+        # model-level tables above with "/ default_prompt" appended. The
+        # per-template section above is already gated the same way.
+        return
     _print_loud_section("Cross-Model Ranking (all model/template pairs)")
     _print_model_template_matrix(bundle)
 
@@ -1192,7 +1198,9 @@ def _prepare_paired_pairwise_rows(
 
     corr = bundle.pairwise.correction_method
     sim_ci_method = bundle.pairwise.simultaneous_ci_method
-    _pretty_ci_method = first_result.test_method[0].upper() + first_result.test_method[1:]
+    # Same formatter the marginal section uses, so one run does not name the
+    # same method two ways ("PPI Logit-t" above, "PPI ppi_logit_t" here).
+    _pretty_ci_method = _pretty_marginal_ci_method(first_result.test_method) or first_result.test_method
     pair_results = list(bundle.pairwise.results.values())
 
     # Canonical left/right ordering based on expected-rank order keeps rows
@@ -1371,8 +1379,6 @@ def _prepare_paired_pairwise_rows(
             print(f"{_DIM}  {p_col_header} = {ppi_prefix}Wilcoxon signed-rank ({bundle.pairwise.correction_method}-corrected){_RESET}")
         elif eff_p_source == "nem":
             print(f"{_DIM}  {p_col_header} = Nemenyi post-hoc (Friedman-based, FWER-controlled){_RESET}")
-        if eff_p_source is not None:
-            print(f"{_DIM}  stars: * p<0.01, ** p<0.001, *** p<0.0001{_RESET}")
         print()
         _cd_labels = list(bundle.labels)
         labels_sorted = [_cd_labels[i] for i in _display_order(bundle)]
@@ -1862,20 +1868,12 @@ def _print_mean_advantage(
     ma_low = float(np.min(all_vals)) - pad
     ma_high = float(np.max(all_vals)) + pad
 
-    _ci_method = (resolved_ci_method or "").lower()
-    if _ci_method in {"wilson", "newcombe", "bayes_binary"}:
-        ci_note = "Wilson-flat CIs"
-    elif _ci_method == "nig":
-        ci_note = "marginal NIG CIs"
-    elif _ci_method == "logit_t":
-        ci_note = "marginal logit-t CIs"
-    elif _ci_method == "t_interval":
-        ci_note = "marginal t CIs"
-    elif _ci_method == "bootstrap_t":
-        ci_note = "marginal bootstrap-t CIs"
-    else:
-        ci_note = "marginal bootstrap CIs"
-    _print_subsection(f"--- {stat_label} Performance ({ci_note}) ---")
+    # The method goes in a footnote line under the table, the way the pairwise
+    # section states its own. It used to be baked into this header off a
+    # lookup, which had no entry for the ppi_* names and so announced
+    # "marginal bootstrap CIs" for every PPI run -- naming a method that had
+    # not been used.
+    _print_subsection(f"--- {stat_label} Performance (marginal CIs) ---")
     ref_label = "grand mean"
     ci_pct = int(round((1 - get_alpha_ci()) * 100))
     _any_multi_ci = any(m is not None for m in multi_ci_per_entity)
@@ -1918,6 +1916,50 @@ def _print_mean_advantage(
             f"{float(ci_high[i]):>8.3f}"
             + (f" {float(n_eff_per_entity[i]):>7.0f}" if _show_neff else "")
         )
+
+    # "marginal", not a bare "CI method:", so it reads distinctly from the
+    # pairwise section's own line -- these are different methods on the same
+    # run (here Logit-t against Paired NIG).
+    _marginal_method = _pretty_marginal_ci_method(resolved_ci_method)
+    if _marginal_method:
+        print(f"{_DIM}  marginal CI method: {_marginal_method}{_RESET}")
+
+
+def _pretty_marginal_ci_method(code: Optional[str]) -> Optional[str]:
+    """Display name for the single-sample CI method actually used.
+
+    Unrecognized codes are returned as-is rather than mapped to a default, so
+    a new method never gets announced under another one's name. A ``ppi_``
+    prefix is split off and shown as such.
+    """
+    raw = (code or "").strip()
+    if not raw:
+        return None
+    base, is_ppi = raw, False
+    # The two spellings that reach here: resolved_ci_method's "ppi_logit_t"
+    # and PairedDiffResult.test_method's already-prefixed "PPI ppi_logit_t".
+    if base.upper().startswith("PPI "):
+        base, is_ppi = base[4:].strip(), True
+    if base.lower().startswith("ppi_"):
+        base, is_ppi = base[4:], True
+    names = {
+        "wilson": "Wilson", "jeffreys": "Jeffreys", "clopper_pearson": "Clopper-Pearson",
+        "newcombe": "Newcombe", "newcombe_mover": "Newcombe MOVER",
+        "bayes_binary": "Bayesian (binary)", "bayes_indep": "Bayesian",
+        "bayes_indep_comp": "Bayesian", "bayes_paired_comp": "Bayesian (paired)",
+        "nig": "NIG", "logit_t": "Logit-t", "logit_t_dither": "Logit-t (dithered)",
+        "t_interval": "t-interval", "beta": "Beta", "el": "Empirical likelihood",
+        "bootstrap": "Bootstrap", "smooth_bootstrap": "Smooth bootstrap",
+        "smooth_bootstrap_dither": "Smooth bootstrap (dithered)",
+        "bootstrap_t": "Bootstrap-t", "bca": "BCa",
+        "bonett_price": "Bonett-Price", "mj_floor": "May-Johnson (floored)",
+        "mj_unfloored": "May-Johnson", "tango_scc": "Tango score",
+        "tango_exact": "Tango exact", "wald_indep": "Wald", "wald": "Wald",
+    }
+    pretty = names.get(base.lower())
+    if pretty is None:                      # unknown: never rename, just tidy
+        pretty = base[0].upper() + base[1:] if base else base
+    return f"PPI {pretty}" if is_ppi else pretty
 
 
 def _print_ppi_banner() -> None:
@@ -1981,7 +2023,15 @@ def _print_omnibus_section(
             cp_str = _format_p_value(corrected_p_value)
             print(f"  PPI-corrected p = {p_color}{cp_str}{_RESET}")
         if rho2_eff is not None and n_eff is not None:
-            print(f"  effective judge-human alignment  rho^2 = {rho2_eff:.2f}")
+            # Named for the estimand, not the judge: this is the correlation of
+            # the two sides' influence functions for THIS test, which for
+            # Friedman/Kruskal-Wallis is a rank agreement and runs well below
+            # the raw judge-human agreement in the alignment report above.
+            # Calling it "judge alignment" invited readers to check it against
+            # the rho^2>=0.2 usability rule, which is a mean-scale threshold.
+            kind = ("rank agreement" if any(k in label.lower() for k in ("friedman", "kruskal"))
+                    else "score agreement")
+            print(f"  {kind}  rho^2 = {rho2_eff:.2f}")
             line = f"  N_eff (effective sample size) = {n_eff:.0f} labels/condition"
             if n_lab_per_entity:
                 line += f", {n_eff / n_lab_per_entity:.1f}x the {n_lab_per_entity:.0f} you labeled"
@@ -1999,6 +2049,27 @@ def _print_omnibus_section(
             f"effect — treat pairwise results with caution.{_RESET}"
         )
     print()
+
+
+def _shape_line(bundle, item_singular: str, item_plural: str) -> str:
+    """Describe the benchmark in the caller's own factor terms.
+
+    compare() runs a single-factor comparison through the template slot of
+    a one-model benchmark, so ``bundle.shape`` reads ``models=1, prompts=k``
+    even when the factor is ``model``. When the caller named its factor
+    (anything but the default template wording), say ``k <factor>s`` instead
+    of exposing that internal slot.
+    """
+    if item_singular in ("template", "prompt") or item_plural in ("templates", "prompts"):
+        return repr(bundle.shape)
+    bench, shape = bundle.benchmark, bundle.shape
+    parts = [f"{bench.n_templates} {item_plural}", f"{bench.n_inputs} inputs"]
+    if shape.n_input_vars > 1:
+        parts.append(f"{shape.n_input_vars} input vars")
+    parts.append(f"{shape.n_evaluators} evaluator{'s' if shape.n_evaluators != 1 else ''}")
+    if bench.n_runs > 1:
+        parts.append(f"{bench.n_runs} runs")
+    return " × ".join(parts)
 
 
 def _print_bundle_summary(
@@ -2024,7 +2095,7 @@ def _print_bundle_summary(
         24, max(len(item_singular), max(len(l) for l in bundle.robustness.labels)) + 2
     )
 
-    print(f"Shape: {bundle.shape}")
+    print(f"Shape: {_shape_line(bundle, item_singular, item_plural)}")
     n_runs = bundle.benchmark.n_runs
     item_singular_title = item_singular.capitalize()
     item_plural_title = item_plural.capitalize()

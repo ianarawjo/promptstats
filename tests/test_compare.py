@@ -430,3 +430,175 @@ class TestCompareCustomFactors:
             _chunker_retriever_scores(), factors=["chunker", "retriever"], rng=_rng()
         )
         assert result._factors == ["chunker", "retriever"]
+
+
+# ---------------------------------------------------------------------------
+# load_from(factors=...) -- declaring the column that varies the condition
+# ---------------------------------------------------------------------------
+
+def _within_subjects_df(n=30, conditions=("baseline", "variant"), seed=0):
+    """The same items scored under every condition, with no canonical role
+    column. Without factors=, `item` alone is not a unique key."""
+    rng = np.random.default_rng(seed)
+    return pd.DataFrame([
+        {"item": f"i{i}", "condition": c, "score": float(rng.integers(1, 6))}
+        for i in range(n) for c in conditions
+    ])
+
+
+def test_load_from_factors_makes_repeated_items_loadable():
+    df = _within_subjects_df()
+    with pytest.raises(EvalLoadError, match="duplicate"):
+        es.load_from(df, metric_cols=["score"])
+    ev = es.load_from(df, metric_cols=["score"], factors="condition")
+    assert ev._factor_cols == ["condition"]
+    assert ev._declared_factors == ["condition"]
+
+
+def test_load_from_factors_accepts_a_list():
+    df = _within_subjects_df()
+    ev = es.load_from(df, metric_cols=["score"], factors=["condition"])
+    assert ev._declared_factors == ["condition"]
+
+
+def test_load_from_factors_rejects_a_column_that_is_not_there():
+    df = _within_subjects_df()
+    with pytest.raises(EvalLoadError, match="not found in the data"):
+        es.load_from(df, metric_cols=["score"], factors="nope")
+
+
+def test_load_from_factors_still_catches_real_duplicates():
+    """Declaring a factor widens the key; it must not switch the check off."""
+    df = _within_subjects_df()
+    dup = pd.concat([df, df.iloc[[0]]], ignore_index=True)
+    with pytest.raises(EvalLoadError, match="duplicate"):
+        es.load_from(dup, metric_cols=["score"], factors="condition")
+
+
+def test_load_from_factors_does_not_put_incidental_columns_in_the_key():
+    """A per-row column would make every row unique and defeat the check."""
+    df = _within_subjects_df()
+    df["notes"] = [f"free text {i}" for i in range(len(df))]
+    dup = pd.concat([df, df.iloc[[0]]], ignore_index=True)
+    with pytest.raises(EvalLoadError, match="duplicate"):
+        es.load_from(dup, metric_cols=["score"], factors="condition")
+
+
+def test_compare_runs_on_a_declared_factor():
+    df = _within_subjects_df()
+    ev = es.load_from(df, metric_cols=["score"], factors="condition")
+    res = es.compare(ev, factors="condition", metric="score",
+                     score_range=(1, 5), design="paired")
+    assert sorted(res.labels) == ["baseline", "variant"]
+
+
+def test_judge_alignment_prefers_the_declared_factor():
+    """With an incidental column present there are two factor columns; the
+    declared one has to win, or alignment cannot tell which to group by."""
+    rng = np.random.default_rng(1)
+    labeled = set(rng.choice(40, 20, replace=False).tolist())
+    rows = []
+    for i in range(40):
+        for c in ("baseline", "variant"):
+            rows.append({"item": f"i{i}", "condition": c, "notes": f"t{i}",
+                         "score": float(rng.integers(1, 6)),
+                         "human_score": (float(rng.integers(1, 6))
+                                         if i in labeled else np.nan)})
+    ev = es.load_from(pd.DataFrame(rows), metric_cols=["score", "human_score"],
+                      factors="condition")
+    ar = es.judge_alignment(ev, llm_metric="score",
+                            human_groundtruth="human_score", selection="random")
+    assert ar.per_condition_metrics is not None
+    assert ar.per_condition_metrics["column"] == "condition"
+
+
+# ---------------------------------------------------------------------------
+# score_type -- declaring what the data is, rather than having it guessed
+# ---------------------------------------------------------------------------
+
+def _likert_df(n=40, seed=0):
+    rng = np.random.default_rng(seed)
+    return pd.DataFrame([
+        {"item": f"i{i}", "condition": c, "score": float(rng.integers(1, 6))}
+        for i in range(n) for c in ("a", "b")
+    ])
+
+
+@pytest.mark.parametrize("values,expected", [
+    ([0.0, 1.0, 1.0, 0.0], "binary"),
+    ([1.0, 2.0, 3.0, 5.0], "likert"),
+    ([0.0, 4.0, 10.0], "likert"),          # a scale starting at zero
+    ([0.0, 7.0, 18.0, 25.0], "likert"),    # wider than 1-10, still discrete
+    ([0.0, 45.0, 99.0], "likert"),
+    ([-3.0, 0.0, 4.0], "continuous"),      # a rating scale does not go negative
+    ([0.12, 0.55, 0.9], "continuous"),
+    ([1.0, 1.5, 2.5], "continuous"),       # half points are not whole numbers
+])
+def test_detect_score_type_covers_the_three_types(values, expected):
+    from evalstats.loader import _detect_score_type
+    assert _detect_score_type(pd.Series(values)) == expected
+
+
+def test_load_from_rejects_a_score_type_that_is_not_one_of_the_three():
+    df = _likert_df()
+    with pytest.raises(EvalLoadError, match="not one of"):
+        es.load_from(df, metric_cols={"score": "grade"}, factors="condition")
+
+
+def test_compare_rejects_a_score_type_that_is_not_one_of_the_three():
+    ev = es.load_from(_likert_df(), metric_cols=["score"], factors="condition")
+    with pytest.raises(ValueError, match="score_type must be one of"):
+        es.compare(ev, factors="condition", metric="score",
+                   score_range=(1, 5), design="paired", score_type="grade")
+
+
+def _paired_ci_method(ev, **kwargs):
+    import contextlib, io
+    with contextlib.redirect_stdout(io.StringIO()) as buf:
+        es.compare(ev, factors="condition", metric="score", score_range=(1, 5),
+                   design="paired", **kwargs).summary()
+    # The marginal section states its own CI method now, and it comes first;
+    # these tests are about the PAIRED one.
+    return [ln for ln in buf.getvalue().splitlines()
+            if "CI method:" in ln and "marginal" not in ln][0]
+
+
+def test_compare_score_type_steers_the_paired_ci_method():
+    """continuous says the discreteness is incidental, which is the one fork
+    the CI selection actually turns on."""
+    ev = es.load_from(_likert_df(), metric_cols=["score"], factors="condition")
+    assert "NIG" in _paired_ci_method(ev)                              # detected
+    assert "NIG" in _paired_ci_method(ev, score_type="likert")
+    assert "logit-t" in _paired_ci_method(ev, score_type="continuous")
+
+
+def test_compare_score_type_steers_the_unpaired_family():
+    ev = es.load_from(_likert_df(), metric_cols=["score"], factors="condition")
+    base = es.compare(ev, factors="condition", metric="score",
+                      score_range=(1, 5), design="unpaired")
+    declared = es.compare(ev, factors="condition", metric="score",
+                          score_range=(1, 5), design="unpaired", score_type="binary")
+    assert base.family == "rank_based"
+    assert declared.family == "binary_proportion"
+
+
+def test_score_type_declared_to_load_from_reaches_compare():
+    """The loader's declaration used to be reported and then ignored."""
+    df = _likert_df()
+    auto = es.load_from(df, metric_cols=["score"], factors="condition")
+    declared = es.load_from(df, metric_cols={"score": "continuous"}, factors="condition")
+    assert "NIG" in _paired_ci_method(auto)
+    assert "logit-t" in _paired_ci_method(declared)
+
+
+def test_eval_type_still_works_as_an_alias():
+    ev = es.load_from(_likert_df(), metric_cols=["score"], factors="condition")
+    assert "logit-t" in _paired_ci_method(ev, eval_type="continuous")
+    assert "NIG" in _paired_ci_method(ev, eval_type="likert")
+
+
+def test_explicit_score_type_beats_the_loader_declaration():
+    df = _likert_df()
+    ev = es.load_from(df, metric_cols={"score": "continuous"}, factors="condition")
+    assert "logit-t" in _paired_ci_method(ev)
+    assert "NIG" in _paired_ci_method(ev, score_type="likert")
