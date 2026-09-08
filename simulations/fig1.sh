@@ -24,6 +24,10 @@ cd "$(dirname "$0")/.."
 SEED=0
 N_ITEMS=80
 N_LAB=25
+# Interval-plot width. 32 is where the pairwise table stops being the widest
+# line in the output (the PPI banner's prose takes over), so the figure gets no
+# narrower below it while the plot only loses resolution.
+PLOT_WIDTH=32
 # The draw's parameters are in the filename, so changing any of them rebuilds
 # rather than silently analyzing a cached spreadsheet from a different draw.
 CSV=simulations/out/fig1_biggen_eval_s${SEED}_n${N_ITEMS}_l${N_LAB}.csv
@@ -53,6 +57,7 @@ printf '%s\n' \
 env PYTHONWARNINGS=ignore "$CLI" analyze "$HUMAN_CSV" \
     --metric human_rating \
     --score-range 1 5 \
+    --plot-width "$PLOT_WIDTH" \
     --correction shaffer \
     --seed $((SEED + 1)) \
     --p-values \
@@ -75,6 +80,7 @@ printf '\n%s\n' \
 # and the appendix recommends it at n>=30, but it puts a bootstrap p in a
 # figure whose point is the rank test.
 exec env PYTHONWARNINGS=ignore "$CLI" analyze "$CSV" \
+    --plot-width "$PLOT_WIDTH" \
     --metric quality \
     --human-groundtruth human_quality \
     --factor model \

@@ -280,6 +280,17 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     analyze.add_argument(
+        "--plot-width",
+        type=int,
+        default=None,
+        metavar="INT",
+        help=(
+            "Character width of the interval-plot column in printed summaries. "
+            "Narrower fits more of the table on screen without changing any "
+            "number; the default suits a full-width terminal."
+        ),
+    )
+    analyze.add_argument(
         "--ci-style",
         choices=["gradient", "line"],
         default="gradient",
@@ -864,6 +875,8 @@ def _cmd_analyze(args: argparse.Namespace) -> None:
                 show_rank_probabilities=getattr(args, "show_rank_probabilities", False),
                 factor_singular=factor_singular,
                 factor_plural=factor_plural,
+                **({} if getattr(args, "plot_width", None) is None
+                   else {"line_width": int(args.plot_width)}),
             )
     summary_text = summary_buffer.getvalue()
     print(summary_text, end="")
@@ -1101,6 +1114,7 @@ def _cmd_analyze_judge(args: argparse.Namespace, df: pd.DataFrame, ci) -> None:
                 top_pairwise=getattr(args, "top_pairwise", None),
                 style=getattr(args, "ci_style", "gradient"),
                 show_rank_probabilities=getattr(args, "show_rank_probabilities", False),
+                plot_width=getattr(args, "plot_width", None),
             )
     summary_text = summary_buffer.getvalue()
     print(summary_text, end="")

@@ -101,6 +101,7 @@ class ComparisonResult:
         p_value_method=_UNSET,
         pairwise_sort: Literal["grouped", "significance"] = "grouped",
         show_rank_probabilities: Optional[bool] = None,
+        plot_width: Optional[int] = None,
     ) -> None:
         """Print the full terminal summary with gradient CI plots.
 
@@ -123,6 +124,9 @@ class ComparisonResult:
         pairwise_sort : {"grouped", "significance"}
             Pairwise row ordering. ``"grouped"`` (default) keeps related pairs
             together; ``"significance"`` sorts by p-value then effect size.
+        plot_width : int, optional
+            Character width of the interval-plot column. Narrower fits more of
+            the table on screen; the default suits a full-width terminal.
         show_rank_probabilities : bool, optional
             Print the bootstrap "Rank Probabilities" block (P(Best)/E[Rank]
             per entity). Off by default (see ``compare(...,
@@ -147,6 +151,7 @@ class ComparisonResult:
             pareto=self._pareto,
             metric=self._metric,
             ci_alpha=self.alpha,
+            **({} if plot_width is None else {"line_width": int(plot_width)}),
         )
 
     def brief(self) -> None:

@@ -1745,8 +1745,8 @@ def _print_pairwise_section(
         header = (
             f"  {'Left':<{pair_item_col_width}s} {'Right':<{pair_item_col_width}s} "
             f"{'Interval Plot':<{line_width}s} "
-            f"{pair_stat_label:>8s} "
-            f"{'CI Low':>9s} {'CI High':>9s}"
+            f"{pair_stat_label:>7s} "
+            f"{'CI Low':>8s} {'CI High':>8s}"
         )
         # Label efficiency, in TWO independent groups, each sitting beside the
         # quantity it describes. They are different estimands and generally
@@ -1793,9 +1793,9 @@ def _print_pairwise_section(
                 f"  {left_label:<{pair_item_col_width}s} "
                 f"{right_label:<{pair_item_col_width}s} "
                 f"{line:<{line_width}s} "
-                f"{float(row_data['point_diff']):+8.4f} "
-                f"{float(row_data['ci_low']):+9.4f} "
-                f"{float(row_data['ci_high']):+9.4f}"
+                f"{float(row_data['point_diff']):+7.3f} "
+                f"{float(row_data['ci_low']):+8.3f} "
+                f"{float(row_data['ci_high']):+8.3f}"
             )
             if _show_ci_eff:
                 row_str += (f" {float(row_data['ci_rho2']):>8.2f}"
