@@ -22,10 +22,11 @@ import argparse
 import io
 import json
 import sys
-from contextlib import redirect_stdout
+import warnings
+from contextlib import contextmanager, redirect_stdout
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
-from typing import Union
+from typing import Optional, Union
 
 import numpy as np
 import pandas as pd
@@ -461,6 +462,64 @@ def _build_parser() -> argparse.ArgumentParser:
             ".json (structured analysis), and .png (robustness interval plot)."
         ),
     )
+    analyze.add_argument(
+        "--human-groundtruth",
+        default=None,
+        metavar="COL",
+        help=(
+            "Column of human labels for a random subset of rows (blank elsewhere), "
+            "e.g. the human_<metric> column written by `evalstats label`. Marks "
+            "--metric as an untrusted LLM-judge score: judge_alignment() runs first "
+            "and prints its report, then every estimate is PPI-corrected. Long "
+            "format only."
+        ),
+    )
+    analyze.add_argument(
+        "--metric",
+        default=None,
+        metavar="COL",
+        help="The LLM-judge score column. Required with --human-groundtruth.",
+    )
+    analyze.add_argument(
+        "--factor",
+        default=None,
+        metavar="COL",
+        help=(
+            "Condition column to compare with --human-groundtruth (default: 'model', "
+            "else 'prompt')."
+        ),
+    )
+    analyze.add_argument(
+        "--label-selection",
+        choices=["random", "unknown"],
+        default="unknown",
+        metavar="HOW",
+        help=(
+            "How the --human-groundtruth rows were chosen: 'random' if sampled "
+            "uniformly (e.g. by `evalstats label`), else 'unknown' (default). PPI "
+            "correction assumes a random sample."
+        ),
+    )
+    analyze.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        metavar="INT",
+        help="Random seed for resampling on the --human-groundtruth path.",
+    )
+    analyze.add_argument(
+        "--score-range",
+        nargs=2,
+        type=float,
+        default=None,
+        metavar=("LO", "HI"),
+        help=(
+            "The metric's true (min, max), e.g. `--score-range 1 5` for a 1-5 Likert "
+            "scale or `--score-range 0 100` for a percentage. Selects the bounded, "
+            "better-calibrated CI methods (logit-t / NIG). When omitted, evalstats "
+            "infers the data kind from the values and says what it assumed."
+        ),
+    )
 
     label = sub.add_parser(
         "label",
@@ -623,8 +682,38 @@ def _cmd_analyze(args: argparse.Namespace) -> None:
 
     print(f"  {len(df)} rows × {len(df.columns)} columns: {list(df.columns)}")
 
+    if getattr(args, "human_groundtruth", None):
+        _cmd_analyze_judge(args, df, ci)
+        return
+
     # --- Detect / parse format ---
     from evalstats.io import from_dataframe
+    from evalstats.loader import _SCORE_ALIASES
+
+    # from_dataframe finds the score column by name and has no argument for
+    # it, so --metric is applied by renaming. Without this the flag is read
+    # only on the --human-groundtruth path above, and a table whose score
+    # column is called something else fails _detect_format's has_score test,
+    # gets parsed as wide, and reports every column as a missing prompt.
+    metric_arg = getattr(args, "metric", None)
+    if metric_arg:
+        if metric_arg not in df.columns:
+            _die(
+                f"--metric '{metric_arg}' is not a column in this file.\n"
+                f"  Available columns: {list(df.columns)}"
+            )
+        if metric_arg.strip().lower() not in _SCORE_ALIASES:
+            clashes = [
+                c for c in df.columns
+                if c != metric_arg and c.strip().lower() in _SCORE_ALIASES
+            ]
+            if clashes:
+                _die(
+                    f"--metric '{metric_arg}' cannot be used while column "
+                    f"'{clashes[0]}' is present: evalstats reads that one as the "
+                    "score column too. Rename or drop one of them."
+                )
+            df = df.rename(columns={metric_arg: "score"})
 
     try:
         result, report = from_dataframe(
@@ -633,7 +722,15 @@ def _cmd_analyze(args: argparse.Namespace) -> None:
             return_report=True,
         )
     except Exception as exc:
-        _die(f"could not parse data: {exc}")
+        hint = ""
+        if not ({c.strip().lower() for c in df.columns} & set(_SCORE_ALIASES)):
+            hint = (
+                "\n  No column is named like a score "
+                f"({', '.join(_SCORE_ALIASES)}), so the table was read as wide "
+                "format. If one of these columns holds the scores, name it with "
+                f"--metric: {list(df.columns)}"
+            )
+        _die(f"could not parse data: {exc}{hint}")
 
     if args.format == "auto":
         print(f"  Detected format: {report.format_detected}")
@@ -683,31 +780,40 @@ def _cmd_analyze(args: argparse.Namespace) -> None:
 
     print()
 
+    score_type, score_range = _resolve_score_kind(np.asarray(result.scores, dtype=float), _score_range_arg(args))
+
     # --- Run analysis ---
     from evalstats.core.router import analyze
     from evalstats.core.summary import print_analysis_summary
 
+    analyze_kwargs = dict(
+        evaluator_mode=evaluator_mode,
+        reference=args.reference,
+        method=getattr(args, "method", "auto"),
+        backend=getattr(args, "backend", "statsmodels"),
+        ci=ci,
+        n_bootstrap=getattr(args, "n_bootstrap", 10_000),
+        correction=args.correction,
+        spread_percentiles=tuple(getattr(args, "spread_percentiles", (10, 90))),
+        failure_threshold=getattr(args, "failure_threshold", None),
+        statistic=getattr(args, "statistic", "mean"),
+        template_model_collapse=getattr(args, "template_model_collapse", "as_runs"),
+        simultaneous_ci=getattr(args, "simultaneous_ci", True),
+        omnibus=getattr(args, "omnibus", False),
+        p_values=getattr(args, "p_values", False),
+        pairwise_test=getattr(args, "pairwise_test", "auto"),
+        ci_style=getattr(args, "ci_style", "gradient"),
+    )
+    if score_range is not None:
+        analyze_kwargs["score_range"] = score_range
+    if score_type in ("likert", "continuous"):
+        # The router still speaks eval_type; translate the way compare() does.
+        analyze_kwargs["eval_type"] = score_type
+
     print("Running analysis ...", flush=True)
     try:
-        analysis = analyze(
-            result,
-            evaluator_mode=evaluator_mode,
-            reference=args.reference,
-            method=getattr(args, "method", "auto"),
-            backend=getattr(args, "backend", "statsmodels"),
-            ci=ci,
-            n_bootstrap=getattr(args, "n_bootstrap", 10_000),
-            correction=args.correction,
-            spread_percentiles=tuple(getattr(args, "spread_percentiles", (10, 90))),
-            failure_threshold=getattr(args, "failure_threshold", None),
-            statistic=getattr(args, "statistic", "mean"),
-            template_model_collapse=getattr(args, "template_model_collapse", "as_runs"),
-            simultaneous_ci=getattr(args, "simultaneous_ci", True),
-            omnibus=getattr(args, "omnibus", False),
-            p_values=getattr(args, "p_values", False),
-            pairwise_test=getattr(args, "pairwise_test", "auto"),
-            ci_style=getattr(args, "ci_style", "gradient"),
-        )
+        with _quiet_score_kind_warnings():
+            analysis = analyze(result, **analyze_kwargs)
     except (ValueError, NotImplementedError) as exc:
         _die(str(exc))
 
@@ -741,6 +847,242 @@ def _cmd_analyze(args: argparse.Namespace) -> None:
             analysis=analysis,
             reference=args.reference,
             n_bootstrap=args.n_bootstrap,
+            ci=ci_for_outputs,
+        )
+
+
+def _score_range_arg(args: argparse.Namespace) -> Optional[tuple[float, float]]:
+    sr = getattr(args, "score_range", None)
+    if sr is None:
+        return None
+    lo, hi = float(sr[0]), float(sr[1])
+    if not lo < hi:
+        _die(f"--score-range LO HI needs LO < HI, got {lo:g} {hi:g}")
+    return (lo, hi)
+
+
+_SCORE_KIND_WARNING_RE = r"score_range|auto-detected|auto-detect"
+
+# A grid spanning more than this many steps is a measurement that happens to
+# be discrete, not an ordinal rating scale. 101 keeps whole-point percentage
+# grades (0-100), the coarsest scale the Likert methods are calibrated for.
+_MAX_ORDINAL_LEVELS = 101
+
+
+@contextmanager
+def _quiet_score_kind_warnings():
+    """The engine warns about inferring the data kind; the CLI has already
+    printed its own notice, so drop those specific warnings."""
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message=f".*({_SCORE_KIND_WARNING_RE}).*", category=UserWarning)
+        yield
+
+
+def _resolve_score_kind(
+    values: np.ndarray, score_range: Optional[tuple[float, float]],
+) -> tuple[Optional[str], Optional[tuple[float, float]]]:
+    """Decide the metric's score type and range for the engine, and say so.
+
+    Returns ``(score_type, score_range)`` in compare()'s vocabulary:
+    ``score_type`` is ``"likert"`` for values on a grid, ``"continuous"``
+    otherwise, and ``None`` for binary data (which needs neither). The range
+    is the one given, else ``(0, 1)`` for data already inside it, else the
+    observed minimum and maximum. Prints a loud notice whenever the range
+    was inferred, since that choice decides which CI family runs.
+    """
+    from evalstats.core.resampling import detect_quantization_step
+    from evalstats.loader import _detect_score_type
+
+    vals = values[np.isfinite(values)]
+    if vals.size == 0:
+        return None, score_range
+    lo, hi = float(vals.min()), float(vals.max())
+    n_distinct = int(np.unique(vals).size)
+    observed = f"{n_distinct} distinct value{'s' if n_distinct != 1 else ''} in [{lo:g}, {hi:g}]"
+
+    detected = _detect_score_type(pd.Series(vals))
+    if detected == "binary" and score_range is None:
+        print(f"Score type: binary 0/1 (detected)  |  observed: {observed}")
+        print()
+        return None, None
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        step = detect_quantization_step(vals.reshape(1, -1))
+    # A grid only means "rating scale" when it is coarse enough to be one.
+    # Token counts and latencies sit on a step-1 grid too; treating them as
+    # ordinal would route them to the Likert methods, which are calibrated
+    # for rubric-sized scales (up to a 0-100 grade), not for measurements
+    # that merely happen to be whole numbers.
+    n_levels = (hi - lo) / step + 1 if step else float("inf")
+    ordinal = step is not None and n_levels <= _MAX_ORDINAL_LEVELS
+    score_type = "likert" if ordinal else "continuous"
+    if ordinal:
+        kind_txt = f"discrete scores on a grid of {step:g} ({n_levels:.0f} levels)"
+    elif step is not None:
+        kind_txt = (f"numeric scores on a grid of {step:g}, too fine "
+                    f"({n_levels:.0f} levels) to be a rating scale")
+    else:
+        kind_txt = "continuous scores"
+
+    if score_range is not None:
+        print(f"Score type: {score_type} ({kind_txt})  |  score range: [{score_range[0]:g}, "
+              f"{score_range[1]:g}] (given)  |  observed: {observed}")
+        print()
+        return score_type, score_range
+
+    if lo >= 0.0 and hi <= 1.0:
+        # (0, 1) is the engine's own default for data inside it, so only the
+        # type is declared -- but it IS declared, so the engine's uncapped
+        # grid check can't reach a different verdict than the line above.
+        print(f"Score type: {score_type} ({kind_txt}) in [0, 1] (detected)  |  observed: {observed}")
+        print()
+        return score_type, None
+
+    bar = "!" * 72
+    print(bar)
+    print("NO --score-range GIVEN. evalstats inferred the data kind from the values:")
+    print(f"  observed: {observed}")
+    if lo == hi:
+        print(f"  inferred: {kind_txt}, but every value is {lo:g}, so no range can be inferred;")
+        print("            using the bounds-agnostic t-interval")
+        print("Pass the metric's true range to use the bounded methods, e.g. --score-range 1 5.")
+        print(bar)
+        print()
+        return score_type, None
+    print(f"  inferred: {kind_txt}; using the observed minimum and maximum as the score")
+    print(f"            range, --score-range {lo:g} {hi:g}, so the bounded, better-calibrated")
+    print(f"            {'Likert' if score_type == 'likert' else 'continuous'} methods apply")
+    print("If the metric's true range is wider (e.g. a 1-5 scale where nobody scored 5),")
+    print(f"pass it: --score-range LO HI. If it is unbounded, pass nothing and ignore this.")
+    print(bar)
+    print()
+    return score_type, (lo, hi)
+
+
+def _cmd_analyze_judge(args: argparse.Namespace, df: pd.DataFrame, ci) -> None:
+    """``analyze --human-groundtruth``: judge_alignment() then a PPI-corrected
+    compare(), the CLI form of the API's ``alignment=`` path."""
+    import evalstats as es
+    from evalstats.alignment import judge_alignment
+
+    metric = getattr(args, "metric", None)
+    human_col = args.human_groundtruth
+    if not metric:
+        _die("--human-groundtruth needs --metric COL, the LLM-judge score column it validates.")
+    for col, flag in ((metric, "--metric"), (human_col, "--human-groundtruth")):
+        if col not in df.columns:
+            _die(f"{flag} '{col}' not found in columns {list(df.columns)}")
+    if metric == human_col:
+        _die("--metric and --human-groundtruth must be different columns.")
+
+    factor = getattr(args, "factor", None)
+    if factor is None:
+        factor = next((c for c in ("model", "prompt") if c in df.columns), None)
+        if factor is None:
+            _die("no 'model' or 'prompt' column; pass --factor COL to say what is being compared.")
+    elif factor not in df.columns:
+        _die(f"--factor '{factor}' not found in columns {list(df.columns)}")
+
+    n_lab = int(df[human_col].notna().sum())
+    if n_lab == 0:
+        _die(f"--human-groundtruth '{human_col}' has no values; fill it in for a random subset of rows first.")
+
+    try:
+        evaldata = es.load_from(
+            df, metric_cols=[metric, human_col],
+            factors=None if factor in ("model", "prompt") else factor,
+        )
+    except Exception as exc:
+        _die(f"could not load data for the judge path (long format only): {exc}")
+    print(f"  {evaldata}")
+    print(f"  Judge score: '{metric}'  |  human labels: '{human_col}' on {n_lab} rows  |  comparing: '{factor}'")
+    item_col = getattr(evaldata, "_col", {}).get("item")
+    n_items = int(df[item_col].nunique()) if item_col in df.columns else len(df)
+    if n_items < MIN_SAMPLE_FLOOR:
+        _die(
+            f"only {n_items} item(s) -- evalstats requires at least "
+            f"{MIN_SAMPLE_FLOOR} to report statistics. Expand your eval set."
+        )
+    print()
+
+    score_type, score_range = _resolve_score_kind(
+        pd.to_numeric(df[metric], errors="coerce").to_numpy(dtype=float), _score_range_arg(args),
+    )
+
+    print("Checking judge alignment ...", flush=True)
+    try:
+        alignment = judge_alignment(
+            evaldata, llm_metric=metric, human_groundtruth=human_col,
+            selection=getattr(args, "label_selection", "unknown"),
+        )
+    except Exception as exc:
+        _die(f"judge_alignment() failed: {exc}")
+    alignment.summary()
+    print()
+
+    compare_kwargs = dict(
+        factors=factor, metric=metric, alignment={metric: alignment},
+        evaluator_mode=getattr(args, "evaluator_mode", "aggregate"),
+        method=getattr(args, "method", "auto"),
+        backend=getattr(args, "backend", "statsmodels"),
+        n_bootstrap=getattr(args, "n_bootstrap", 10_000),
+        correction=getattr(args, "correction", "auto"),
+        spread_percentiles=tuple(getattr(args, "spread_percentiles", (10, 90))),
+        failure_threshold=getattr(args, "failure_threshold", None),
+        statistic=getattr(args, "statistic", "mean"),
+        template_model_collapse=getattr(args, "template_model_collapse", "as_runs"),
+        simultaneous_ci=getattr(args, "simultaneous_ci", True),
+        omnibus=getattr(args, "omnibus", False),
+        p_values=getattr(args, "p_values", False),
+        pairwise_test=getattr(args, "pairwise_test", "auto"),
+        ci_style=getattr(args, "ci_style", "gradient"),
+    )
+    reference = getattr(args, "reference", "grand_mean")
+    if reference != "grand_mean":
+        compare_kwargs["baseline"] = reference
+    seed = getattr(args, "seed", None)
+    if seed is not None:
+        compare_kwargs["rng"] = seed
+    if score_range is not None:
+        compare_kwargs["score_range"] = score_range
+    if score_type in ("likert", "continuous"):
+        compare_kwargs["score_type"] = score_type
+
+    print("Running PPI-corrected analysis ...", flush=True)
+    try:
+        with _quiet_score_kind_warnings():
+            result = es.compare(evaldata, **compare_kwargs)
+    except (ValueError, NotImplementedError) as exc:
+        _die(str(exc))
+
+    print()
+    summary_buffer = io.StringIO()
+    with redirect_stdout(summary_buffer):
+        if getattr(args, "brief", False):
+            from evalstats.core.summary import print_brief_summary
+            print_brief_summary(result.full_analysis)
+        else:
+            result.summary(
+                top_pairwise=getattr(args, "top_pairwise", None),
+                style=getattr(args, "ci_style", "gradient"),
+                show_rank_probabilities=getattr(args, "show_rank_probabilities", False),
+            )
+    summary_text = summary_buffer.getvalue()
+    print(summary_text, end="")
+
+    out_paths = getattr(args, "out", None)
+    if out_paths:
+        if ci is None:
+            from evalstats.config import get_alpha_ci
+            ci_for_outputs = 1.0 - get_alpha_ci()
+        else:
+            ci_for_outputs = ci
+        _write_outputs(
+            out_paths=out_paths,
+            summary_text=summary_text,
+            analysis=result.full_analysis,
+            reference=getattr(args, "reference", "grand_mean"),
+            n_bootstrap=getattr(args, "n_bootstrap", 10_000),
             ci=ci_for_outputs,
         )
 
@@ -872,7 +1214,9 @@ def _cmd_label(args: argparse.Namespace) -> None:
         )
         if metrics:
             print(
-                "Once labeled, call judge_alignment(evaldata, llm_metric=..., "
+                f"Once labeled, run `evalstats analyze <file> --metric {metrics[0]} "
+                f"--human-groundtruth {human_cols[0]} --label-selection random`, or call "
+                f"judge_alignment(evaldata, llm_metric={metrics[0]!r}, "
                 f"human_groundtruth={human_cols[0]!r}, selection='random')."
             )
         else:

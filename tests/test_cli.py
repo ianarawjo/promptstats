@@ -454,6 +454,9 @@ def test_cmd_analyze_routes_format_and_forwards_options(
 
     assert analysis_call == {
         "benchmark": result,
+        # Inferred from the values and declared, so the engine can't reach a
+        # different verdict than the notice printed.
+        "eval_type": "continuous",
         "evaluator_mode": "aggregate",
         "reference": "Prompt A",
         "method": "permutation",
@@ -776,3 +779,370 @@ def test_cmd_analyze_prints_ci_plot_style_in_summary_output(
     assert mean_rows, "Expected prompt interval rows in mean-performance section"
     has_gradient_chars = any(any(ch in row for ch in "░▒▓█") for row in mean_rows)
     assert has_gradient_chars is expect_gradient_glyphs
+
+# ---------------------------------------------------------------------------
+# analyze --human-groundtruth (judge path)
+# ---------------------------------------------------------------------------
+
+
+def _make_judge_long_df(n_items: int = 30, n_lab: int = 15, seed: int = 0) -> pd.DataFrame:
+    """Three models on shared items; a judge score everywhere, a human label
+    on the same random n_lab items for every model. n_lab=15 is the paired
+    PPI floor; below it every pair is left uncorrected."""
+    rng = np.random.default_rng(seed)
+    truth = {f"i{i}": rng.uniform(1, 5) for i in range(n_items)}
+    labeled = set(rng.choice(sorted(truth), size=n_lab, replace=False))
+    rows = []
+    for m_idx, model in enumerate(["A", "B", "C"]):
+        for item, t in truth.items():
+            human = min(5.0, max(1.0, t + 0.4 * m_idx))
+            judge = float(np.clip(round(human + rng.normal(0, 0.8)), 1, 5))
+            rows.append({
+                "model": model, "item": item, "score": judge,
+                "human_score": human if item in labeled else np.nan,
+            })
+    return pd.DataFrame(rows)
+
+
+def _judge_args(csv_path, **overrides):
+    base = dict(
+        file=csv_path, format="auto", sheet="0", evaluator_mode="aggregate", ci=None,
+        ci_style="gradient", method="auto", backend="statsmodels", n_bootstrap=50,
+        correction="auto", spread_percentiles=(10.0, 90.0), reference="grand_mean",
+        failure_threshold=None, statistic="mean", template_model_collapse="as_runs",
+        simultaneous_ci=True, omnibus=False, p_values=True, pairwise_test="auto",
+        top_pairwise=5, brief=False, out=None, show_rank_probabilities=False,
+        human_groundtruth="human_score", metric="score", factor=None,
+        label_selection="random", seed=0,
+    )
+    base.update(overrides)
+    return argparse.Namespace(**base)
+
+
+def test_build_parser_accepts_human_groundtruth_flags():
+    parser = cli._build_parser()
+    args = parser.parse_args([
+        "analyze", "results.csv", "--metric", "score", "--human-groundtruth", "human_score",
+        "--label-selection", "random", "--factor", "model", "--seed", "7", "--p-values",
+    ])
+    assert args.human_groundtruth == "human_score"
+    assert args.metric == "score"
+    assert args.label_selection == "random"
+    assert args.factor == "model"
+    assert args.seed == 7
+    # Defaults: the judge path is off unless asked for.
+    plain = parser.parse_args(["analyze", "results.csv"])
+    assert plain.human_groundtruth is None and plain.metric is None
+    assert plain.label_selection == "unknown"
+
+
+def test_cmd_analyze_human_groundtruth_runs_alignment_then_ppi_compare(tmp_path, capsys):
+    csv_path = tmp_path / "judge_long.csv"
+    _make_judge_long_df().to_csv(csv_path, index=False)
+
+    cli._cmd_analyze(_judge_args(csv_path))
+    out = capsys.readouterr().out
+
+    assert "Judge alignment report" in out
+    assert "Label selection: ✓ random" in out
+    assert "PPI-CORRECTED" in out
+    assert out.index("Judge alignment report") < out.index("PPI-CORRECTED")
+    assert "Executive Summary" in out
+    assert "PPI-" in out.split("Pairwise Comparisons", 1)[1]
+
+
+def test_cmd_analyze_human_groundtruth_is_reproducible_from_seed(tmp_path, capsys):
+    csv_path = tmp_path / "judge_long.csv"
+    _make_judge_long_df().to_csv(csv_path, index=False)
+
+    cli._cmd_analyze(_judge_args(csv_path, seed=3))
+    first = capsys.readouterr().out
+    cli._cmd_analyze(_judge_args(csv_path, seed=3))
+    second = capsys.readouterr().out
+    assert first == second
+
+
+def test_cmd_analyze_human_groundtruth_infers_factor_and_writes_out(tmp_path, capsys):
+    csv_path = tmp_path / "judge_long.csv"
+    _make_judge_long_df().to_csv(csv_path, index=False)
+    out_md = tmp_path / "summary.md"
+
+    cli._cmd_analyze(_judge_args(csv_path, factor=None, out=[str(out_md)]))
+    out = capsys.readouterr().out
+
+    assert "comparing: 'model'" in out
+    assert out_md.exists() and "PPI-CORRECTED" in out_md.read_text()
+
+
+@pytest.mark.parametrize(
+    "overrides, message",
+    [
+        ({"metric": None}, "needs --metric"),
+        ({"metric": "nope"}, "--metric 'nope' not found"),
+        ({"human_groundtruth": "nope"}, "--human-groundtruth 'nope' not found"),
+        ({"factor": "nope"}, "--factor 'nope' not found"),
+    ],
+)
+def test_cmd_analyze_human_groundtruth_rejects_bad_columns(tmp_path, capsys, overrides, message):
+    csv_path = tmp_path / "judge_long.csv"
+    _make_judge_long_df().to_csv(csv_path, index=False)
+
+    with pytest.raises(SystemExit):
+        cli._cmd_analyze(_judge_args(csv_path, **overrides))
+    assert message in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# --score-range and the inferred-data-kind notice
+# ---------------------------------------------------------------------------
+
+
+def test_build_parser_accepts_score_range():
+    parser = cli._build_parser()
+    args = parser.parse_args(["analyze", "results.csv", "--score-range", "1", "5"])
+    assert args.score_range == [1.0, 5.0]
+    assert parser.parse_args(["analyze", "results.csv"]).score_range is None
+
+
+def test_cmd_analyze_prints_loud_notice_when_score_range_omitted(tmp_path, capsys):
+    csv_path = tmp_path / "judge_long.csv"
+    _make_judge_long_df().to_csv(csv_path, index=False)
+
+    cli._cmd_analyze(_judge_args(csv_path))
+    out = capsys.readouterr().out
+
+    assert "NO --score-range GIVEN" in out
+    assert "observed: 5 distinct values in [1, 5]" in out
+    assert "--score-range 1 5" in out
+    assert "discrete" in out
+    assert out.index("NO --score-range GIVEN") < out.index("Judge alignment report")
+    # The inferred (1, 5) range reaches the engine: bounded methods, not the t-interval.
+    # Normalized: the summary prints display names ("Logit-t"), not raw codes.
+    pairwise = out.split("Pairwise Comparisons", 1)[1].lower().replace("-", "_")
+    assert "t_interval" not in pairwise and ("logit_t" in pairwise or "nig" in pairwise)
+
+
+def test_cmd_analyze_score_range_is_forwarded_and_silences_notice(tmp_path, capsys):
+    csv_path = tmp_path / "judge_long.csv"
+    _make_judge_long_df().to_csv(csv_path, index=False)
+
+    cli._cmd_analyze(_judge_args(csv_path, score_range=[1, 5]))
+    out = capsys.readouterr().out
+
+    assert "NO --score-range GIVEN" not in out
+    assert "score range: [1, 5] (given)" in out
+    # Bounded methods are only reachable once the range is declared.
+    assert "logit_t" in out.split("Pairwise Comparisons", 1)[1].lower().replace("-", "_")
+
+
+def test_cmd_analyze_regular_path_notice_and_forwarding(tmp_path, capsys, monkeypatch):
+    csv_path = tmp_path / "smoke_long_binary.csv"
+    _make_binary_long_df().to_csv(csv_path, index=False)
+    seen = {}
+    from evalstats.core import router as _router
+    real_analyze = _router.analyze
+
+    def spy(result, **kwargs):
+        seen.update(kwargs)
+        return real_analyze(result, **kwargs)
+
+    monkeypatch.setattr(_router, "analyze", spy)
+    base = dict(
+        file=csv_path, format="long", sheet="0", evaluator_mode="aggregate", ci=None,
+        ci_style="gradient", method="auto", backend="statsmodels", n_bootstrap=30,
+        correction="auto", spread_percentiles=(10.0, 90.0), reference="grand_mean",
+        failure_threshold=None, statistic="mean", template_model_collapse="as_runs",
+        simultaneous_ci=False, omnibus=False, top_pairwise=3, out=None,
+    )
+    cli._cmd_analyze(argparse.Namespace(**base))
+    out = capsys.readouterr().out
+    assert "NO --score-range GIVEN" not in out and "binary 0/1 (detected)" in out
+    assert "score_range" not in seen and "eval_type" not in seen
+
+    cli._cmd_analyze(argparse.Namespace(**base, score_range=[0, 1]))
+    out = capsys.readouterr().out
+    assert "score range: [0, 1] (given)" in out
+    assert seen["score_range"] == (0.0, 1.0)
+
+
+def test_cmd_analyze_regular_path_infers_observed_range_for_likert(tmp_path, capsys, monkeypatch):
+    rng = np.random.default_rng(0)
+    rows = [{"prompt": p, "input": f"i{i}", "score": float(rng.integers(1, 6))}
+            for p in ("A", "B") for i in range(30)]
+    csv_path = tmp_path / "likert_long.csv"
+    pd.DataFrame(rows).to_csv(csv_path, index=False)
+    seen = {}
+    from evalstats.core import router as _router
+    real_analyze = _router.analyze
+
+    def spy(result, **kwargs):
+        seen.update(kwargs)
+        return real_analyze(result, **kwargs)
+
+    monkeypatch.setattr(_router, "analyze", spy)
+    cli._cmd_analyze(argparse.Namespace(
+        file=csv_path, format="long", sheet="0", evaluator_mode="aggregate", ci=None,
+        ci_style="gradient", method="auto", backend="statsmodels", n_bootstrap=30,
+        correction="auto", spread_percentiles=(10.0, 90.0), reference="grand_mean",
+        failure_threshold=None, statistic="mean", template_model_collapse="as_runs",
+        simultaneous_ci=False, omnibus=False, top_pairwise=3, out=None,
+    ))
+    out = capsys.readouterr().out
+    assert "NO --score-range GIVEN" in out
+    assert "observed minimum and maximum" in out
+    assert seen["score_range"] == (1.0, 5.0)
+    assert seen["eval_type"] == "likert"
+    assert "NIG" in out.split("Pairwise Comparisons", 1)[1]
+
+
+def test_cmd_analyze_constant_metric_gets_no_range(tmp_path, capsys, monkeypatch):
+    rows = [{"prompt": p, "input": f"i{i}", "score": 3.0} for p in ("A", "B") for i in range(30)]
+    csv_path = tmp_path / "const_long.csv"
+    pd.DataFrame(rows).to_csv(csv_path, index=False)
+    seen = {}
+    from evalstats.core import router as _router
+    real_analyze = _router.analyze
+    monkeypatch.setattr(_router, "analyze", lambda result, **kw: (seen.update(kw), real_analyze(result, **kw))[1])
+    cli._cmd_analyze(argparse.Namespace(
+        file=csv_path, format="long", sheet="0", evaluator_mode="aggregate", ci=None,
+        ci_style="gradient", method="auto", backend="statsmodels", n_bootstrap=30,
+        correction="auto", spread_percentiles=(10.0, 90.0), reference="grand_mean",
+        failure_threshold=None, statistic="mean", template_model_collapse="as_runs",
+        simultaneous_ci=False, omnibus=False, top_pairwise=3, out=None,
+    ))
+    out = capsys.readouterr().out
+    assert "no range can be inferred" in out
+    assert "score_range" not in seen
+
+
+def test_cmd_analyze_rejects_inverted_score_range(tmp_path, capsys):
+    csv_path = tmp_path / "judge_long.csv"
+    _make_judge_long_df().to_csv(csv_path, index=False)
+    with pytest.raises(SystemExit):
+        cli._cmd_analyze(_judge_args(csv_path, score_range=[5, 1]))
+    assert "LO < HI" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# Score-kind inference across realistic metric shapes
+# ---------------------------------------------------------------------------
+
+
+_RNG = np.random.default_rng(0)
+
+
+@pytest.mark.parametrize(
+    "name, values, want_type, want_range, want_loud",
+    [
+        # Nothing to declare: binary, and data already inside the engine's
+        # own [0, 1] default. These stay quiet.
+        ("binary", _RNG.integers(0, 2, 60).astype(float), None, None, False),
+        ("all ones", np.ones(60), None, None, False),
+        ("unit floats", _RNG.uniform(0, 1, 60), "continuous", None, False),
+        ("quarters in [0,1]", _RNG.choice([0.0, 0.25, 0.5, 0.75, 1.0], 60), "likert", None, False),
+        ("fine grid in [0,1]", np.round(_RNG.uniform(0, 1, 60), 5), "continuous", None, False),
+        # Range inferred from the values: loud.
+        ("likert 1-5", _RNG.integers(1, 6, 60).astype(float), "likert", (1.0, 5.0), True),
+        ("likert 1-7", _RNG.integers(1, 8, 60).astype(float), "likert", (1.0, 7.0), True),
+        ("half points 1-5", np.round(_RNG.uniform(1, 5, 60) * 2) / 2, "likert", (1.0, 5.0), True),
+        ("bipolar -2..2", _RNG.integers(-2, 3, 60).astype(float), "likert", (-2.0, 2.0), True),
+        ("percent int", np.arange(0, 101, dtype=float), "likert", (0.0, 100.0), True),
+        # Discrete, but far too many levels to be a rating scale.
+        ("token counts", _RNG.integers(10, 4000, 60).astype(float), "continuous", None, True),
+        ("latency ms", _RNG.uniform(50, 5000, 60), "continuous", None, True),
+        ("log-odds", _RNG.normal(0, 2, 60), "continuous", None, True),
+        # No spread, so no range can be inferred -- loud, but nothing declared.
+        ("constant", np.full(60, 3.0), "continuous", None, True),
+        ("empty", np.full(60, np.nan), None, None, False),
+    ],
+)
+def test_resolve_score_kind_over_realistic_metrics(capsys, name, values, want_type, want_range, want_loud):
+    vals = np.asarray(values, dtype=float)
+    score_type, score_range = cli._resolve_score_kind(vals, None)
+    out = capsys.readouterr().out
+    assert score_type == want_type, f"{name}: score_type {score_type!r}"
+    if want_range is None:
+        assert score_range is None or score_range == (float(np.nanmin(vals)), float(np.nanmax(vals)))
+    else:
+        assert score_range == want_range, f"{name}: range {score_range!r}"
+    assert ("NO --score-range GIVEN" in out) is want_loud, f"{name}: notice mismatch"
+    # An inferred range is always the observed span, never a guessed rubric.
+    if score_range is not None:
+        assert score_range == (float(np.nanmin(vals)), float(np.nanmax(vals)))
+
+
+def test_resolve_score_kind_honours_an_explicit_range(capsys):
+    vals = np.array([1.0, 2.0, 3.0, 4.0] * 15)
+    score_type, score_range = cli._resolve_score_kind(vals, (1.0, 5.0))
+    out = capsys.readouterr().out
+    assert score_range == (1.0, 5.0) and score_type == "likert"
+    assert "NO --score-range GIVEN" not in out and "(given)" in out
+
+
+# ---------------------------------------------------------------------------
+# --metric on the plain analyze path (no --human-groundtruth)
+# ---------------------------------------------------------------------------
+
+def _two_metric_df() -> pd.DataFrame:
+    """Two numeric columns, neither named like a score, with opposite orderings
+    so the reported means say which one was actually analyzed."""
+    return pd.DataFrame([
+        {"item": f"i{i}", "model": m, "expert_rating": 1.0 + j, "other_num": 9.0 - j}
+        for j, m in enumerate(["A", "B"]) for i in range(_MOCK_N_INPUTS)
+    ])
+
+
+def _plain_args(csv_path, **overrides):
+    args = _judge_args(csv_path, human_groundtruth=None, metric=None)
+    for k, v in overrides.items():
+        setattr(args, k, v)
+    return args
+
+
+@pytest.mark.parametrize("metric,leader,leader_mean", [
+    ("expert_rating", "B", 2.0),   # expert_rating: A=1, B=2
+    ("other_num", "A", 9.0),       # other_num:     A=9, B=8
+])
+def test_metric_selects_the_column_on_the_plain_path(tmp_path, capsys, metric, leader, leader_mean):
+    """--metric used to be read only on the --human-groundtruth path, so a
+    score column named anything else failed _detect_format's has_score test,
+    was parsed as wide, and died reporting every column as a missing prompt."""
+    csv_path = tmp_path / "two_metrics.csv"
+    _two_metric_df().to_csv(csv_path, index=False)
+
+    cli._cmd_analyze(_plain_args(csv_path, metric=metric))
+    out = capsys.readouterr().out
+
+    assert "Detected format: long" in out
+    summary = out.split("Executive Summary", 1)[1]
+    top = [ln for ln in summary.splitlines() if ln.strip().startswith(leader)][0]
+    assert f"{leader_mean:.3f}" in top, top
+
+
+def test_metric_rejects_a_column_that_is_not_there(tmp_path, capsys):
+    csv_path = tmp_path / "two_metrics.csv"
+    _two_metric_df().to_csv(csv_path, index=False)
+    with pytest.raises(SystemExit):
+        cli._cmd_analyze(_plain_args(csv_path, metric="nope"))
+    err = capsys.readouterr().err
+    assert "not a column" in err and "expert_rating" in err
+
+
+def test_metric_rejects_a_clash_with_an_existing_score_column(tmp_path, capsys):
+    csv_path = tmp_path / "clash.csv"
+    _two_metric_df().assign(score=99.0).to_csv(csv_path, index=False)
+    with pytest.raises(SystemExit):
+        cli._cmd_analyze(_plain_args(csv_path, metric="expert_rating"))
+    err = capsys.readouterr().err
+    assert "score" in err and "Rename or drop" in err
+
+
+def test_unnamed_score_column_error_points_at_the_metric_flag(tmp_path, capsys):
+    """Without --metric the parse still fails, but the message has to name the
+    real cause instead of only reporting an incomplete design."""
+    csv_path = tmp_path / "two_metrics.csv"
+    _two_metric_df().to_csv(csv_path, index=False)
+    with pytest.raises(SystemExit):
+        cli._cmd_analyze(_plain_args(csv_path))
+    err = capsys.readouterr().err
+    assert "--metric" in err and "expert_rating" in err

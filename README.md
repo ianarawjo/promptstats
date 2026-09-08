@@ -276,6 +276,14 @@ evalstats label results.csv         # draw a random, MCAR-compliant sample of it
 
 `evalstats label` picks a uniformly random sample of items per condition (respecting the PPI sample-size floors: 15 minimum, 30 recommended) and writes a CSV/XLSX with a `human_<metric>` column ready for grading, the safe way to build the labeled subset `alignment=`/`*_lab` needs above. Run `evalstats label --help` for the full option list.
 
+Once that column is filled in, `--human-groundtruth` marks the metric as an untrusted LLM-judge score and runs the same correction from the command line: `judge_alignment()` first, printing its report, then a PPI-corrected `compare()`.
+
+```bash
+evalstats analyze results.csv --metric score --human-groundtruth human_score --label-selection random --p-values
+```
+
+Pass `--score-range LO HI` (e.g. `--score-range 1 5` for a Likert scale) so the bounded CI methods are used. Without it, `analyze` infers the data kind from the values and prints what it assumed; if that guess is wrong, the fix is to declare the range.
+
 ## Examples
 
 `examples/` has 25+ runnable, self-contained scripts covering common workflows: synthetic and OpenAI-backed benchmarks, multi-run comparisons, PPI-corrected judge alignment, factorial designs, and reliability/robustness demos. From the repository root:
