@@ -237,6 +237,7 @@ def print_analysis_summary(
     metric: Optional[str] = None,
     factor_singular: str = "model",
     factor_plural: str = "models",
+    ci_alpha: Optional[float] = None,
 ) -> None:
     """Print a concise console summary of analyze() results.
 
@@ -284,6 +285,7 @@ def print_analysis_summary(
             show_rank_probabilities=show_rank_probabilities,
             pareto=pareto,
             metric=metric,
+            ci_alpha=ci_alpha,
         )
         return
 
@@ -842,7 +844,10 @@ def _print_multi_model_summary(
 
     ref_label_str = "grand mean"
     print()
-    _print_subsection(f"--- {stat_label} Performance: All {n_show} (marginal CIs) ---")
+    _print_subsection(
+        f"--- {stat_label} Performance: All {n_show} "
+        f"(marginal {int(round((1 - get_alpha_ci()) * 100))}% CIs) ---"
+    )
     _ci_legend_mm = _legend_ci_label(style, int(round((1 - get_alpha_ci()) * 100)), cross_rob.multi_ci is not None)
     _mean_marker_mm = _mean_marker_legend(style, stat_label.lower())
     print(
@@ -1165,6 +1170,7 @@ def _prepare_paired_pairwise_rows(
     p_value_method: Optional[str],
     sort: bool,
     pairwise_sort: Literal["grouped", "significance"],
+    alpha: Optional[float] = None,
 ) -> tuple[Optional[list[dict]], dict]:
     """Normalize an AnalysisBundle's pairwise results into the common row
     shape :func:`_print_pairwise_section` renders, plus metadata describing
@@ -1397,10 +1403,11 @@ def _prepare_paired_pairwise_rows(
         # since they can use different correction methods. Dimmed along with
         # the rest of this footnote block (ES=, p-value detail, stars:) --
         # methods detail, not part of the data itself.
-        _line1 = [f"CI method: {_pretty_ci_method}"]
+        _alpha = get_alpha_ci() if alpha is None else alpha
+        _line1 = [f"{int(round((1 - _alpha) * 100))}% CI method: {_pretty_ci_method}"]
         if p_value_method_label:
             _line1.append(f"p-value method: {p_value_method_label}")
-        _line1.append(f"α={get_alpha_ci():g}")
+        _line1.append(f"α={_alpha:g}")
         print(f"{_DIM}  {'  |  '.join(_line1)}{_RESET}")
 
         _line2 = [f"Simultaneous CI method: {_pretty_simultaneous_ci(sim_ci_method)}"]
@@ -1433,7 +1440,11 @@ def _prepare_paired_pairwise_rows(
         )
 
     meta = {
-        "section_header": f"--- Pairwise Comparisons ({_pretty_ci_method} CIs) ---",
+        "section_header": (
+            f"--- Pairwise Comparisons "
+            f"({int(round((1 - (get_alpha_ci() if alpha is None else alpha)) * 100))}% "
+            f"{_pretty_ci_method} CIs) ---"
+        ),
         "pair_stat_label": pair_stat_label,
         "pair_item_col_width": pair_item_col_width,
         "effect_label": "Left - Right",
@@ -1547,7 +1558,8 @@ def _prepare_unpaired_pairwise_rows(
             )
 
     def _footer(_rows: list[dict], _max_pairs: int) -> None:
-        _line1 = [f"CI method: {ci_method}"] if ci_method else []
+        _line1 = ([f"{int(round((1 - result.alpha) * 100))}% CI method: {ci_method}"]
+                  if ci_method else [])
         if _line1:
             if show_p and pairwise_test_name:
                 _line1.append(f"p-value method: {ppi_prefix}{pairwise_test_name}")
@@ -1597,7 +1609,8 @@ def _prepare_unpaired_pairwise_rows(
     ci_method = getattr(result, "pairwise_ci_method", None)
     meta = {
         "section_header": (
-            f"--- Pairwise Comparisons ({ci_method} CIs) ---" if ci_method
+            f"--- Pairwise Comparisons ({int(round((1 - result.alpha) * 100))}% {ci_method} CIs) ---"
+            if ci_method
             else f"--- Pairwise Comparisons ({_FAMILY_DISPLAY_UNPAIRED[result.family]}) ---"
         ),
         "pair_stat_label": pair_stat_label,
@@ -1624,6 +1637,7 @@ def _print_pairwise_section(
     p_value_method: Optional[str] = None,
     pairwise_sort: Literal["grouped", "significance"] = "grouped",
     style: Literal["line", "gradient"] = "gradient",
+    ci_alpha: Optional[float] = None,
 ) -> None:
     """Print the pairwise comparisons block for either a paired
     ``AnalysisBundle`` or an unpaired ``GroupComparisonResult``.
@@ -1659,7 +1673,8 @@ def _print_pairwise_section(
     """
     if isinstance(bundle_or_result, AnalysisBundle):
         rows, meta = _prepare_paired_pairwise_rows(
-            bundle_or_result, p_value_method=p_value_method, sort=sort, pairwise_sort=pairwise_sort,
+            bundle_or_result, p_value_method=p_value_method, sort=sort,
+            pairwise_sort=pairwise_sort, alpha=ci_alpha,
         )
         if rows is None:
             return
@@ -1878,6 +1893,7 @@ def _print_mean_advantage(
     style: Literal["line", "gradient"] = "gradient",
     n_eff_per_entity: Optional[list] = None,
     rho2_per_entity: Optional[list] = None,
+    ci_alpha: Optional[float] = None,
 ) -> None:
     """Print the absolute performance interval-plot table for a set of entities.
 
@@ -1922,9 +1938,9 @@ def _print_mean_advantage(
     # lookup, which had no entry for the ppi_* names and so announced
     # "marginal bootstrap CIs" for every PPI run -- naming a method that had
     # not been used.
-    _print_subsection(f"--- {stat_label} Performance (marginal CIs) ---")
+    ci_pct = int(round((1 - (get_alpha_ci() if ci_alpha is None else ci_alpha)) * 100))
+    _print_subsection(f"--- {stat_label} Performance (marginal {ci_pct}% CIs) ---")
     ref_label = "grand mean"
-    ci_pct = int(round((1 - get_alpha_ci()) * 100))
     _any_multi_ci = any(m is not None for m in multi_ci_per_entity)
     _ci_legend_ma = _legend_ci_label(style, ci_pct, _any_multi_ci)
     _mean_marker_ma = _mean_marker_legend(style, stat_label.lower())
@@ -1942,9 +1958,12 @@ def _print_mean_advantage(
         and len(rho2_per_entity) == len(labels)
         and all(v is not None for v in rho2_per_entity)
     )
+    # Widths and separators mirror the value row below exactly (7, 8, 8 with a
+    # space between each); the header used to be 8/9/9 with no space between
+    # the two CI columns, so it sat two characters right of its own numbers.
     print(
-        f"  {item_singular_title:<{template_col_width}s} {'Interval Plot':<{line_width}s} {stat_label:>8s} "
-        f"{'CI Low':>9s} {'CI High':>9s}"
+        f"  {item_singular_title:<{template_col_width}s} {'Interval Plot':<{line_width}s} {stat_label:>7s} "
+        f"{'CI Low':>8s} {'CI High':>8s}"
         + (f" {'rho^2':>7s}" if _show_rho2 else "")
         + (f" {'N_eff':>7s}" if _show_neff else "")
     )
@@ -1978,7 +1997,7 @@ def _print_mean_advantage(
     # run (here Logit-t against Paired NIG).
     _marginal_method = _pretty_marginal_ci_method(resolved_ci_method)
     if _marginal_method:
-        print(f"{_DIM}  CI method: {_marginal_method}{_RESET}")
+        print(f"{_DIM}  {ci_pct}% CI method: {_marginal_method}{_RESET}")
 
 
 def _pretty_marginal_ci_method(code: Optional[str]) -> Optional[str]:
@@ -2133,6 +2152,7 @@ def _shape_line(bundle, item_singular: str, item_plural: str) -> str:
 def _print_bundle_summary(
     bundle: AnalysisBundle,
     *,
+    ci_alpha: Optional[float] = None,
     rng_seed=_SEED_UNSET,
     top_pairwise: int = None,
     line_width: int,
@@ -2165,6 +2185,7 @@ def _print_bundle_summary(
     )
     print()
 
+    _eff_alpha = get_alpha_ci() if ci_alpha is None else ci_alpha
     _ppi_on = getattr(bundle, "ppi_applied", False)
     if _ppi_on:
         _print_ppi_banner()
@@ -2226,6 +2247,7 @@ def _print_bundle_summary(
         style=style,
         n_eff_per_entity=getattr(bundle, "_marginal_n_eff", None),
         rho2_per_entity=getattr(bundle, "_marginal_rho2", None),
+        ci_alpha=_eff_alpha,
     )
     print()
 
@@ -2251,6 +2273,7 @@ def _print_bundle_summary(
         p_value_method=p_value_method,
         pairwise_sort=pairwise_sort,
         style=style,
+        ci_alpha=_eff_alpha,
     )
     _print_behavioral_agreement_section(
         bundle,

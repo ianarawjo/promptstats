@@ -146,6 +146,7 @@ class ComparisonResult:
             item_plural=item_plural,
             pareto=self._pareto,
             metric=self._metric,
+            ci_alpha=self.alpha,
         )
 
     def brief(self) -> None:
