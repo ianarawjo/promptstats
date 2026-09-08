@@ -485,8 +485,10 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="COL",
         help=(
-            "Condition column to compare with --human-groundtruth (default: 'model', "
-            "else 'prompt')."
+            "Column holding the conditions to compare -- models, prompts, apps, "
+            "study arms. Needed when that column is not already named 'model' or "
+            "'prompt'; the comparison is reported under the name you give here. "
+            "Defaults to 'model', else 'prompt'."
         ),
     )
     analyze.add_argument(
@@ -688,7 +690,7 @@ def _cmd_analyze(args: argparse.Namespace) -> None:
 
     # --- Detect / parse format ---
     from evalstats.io import from_dataframe
-    from evalstats.loader import _SCORE_ALIASES
+    from evalstats.loader import _CANONICAL_ALIASES, _SCORE_ALIASES
 
     # from_dataframe finds the score column by name and has no argument for
     # it, so --metric is applied by renaming. Without this the flag is read
@@ -714,6 +716,35 @@ def _cmd_analyze(args: argparse.Namespace) -> None:
                     "score column too. Rename or drop one of them."
                 )
             df = df.rename(columns={metric_arg: "score"})
+
+    # --- --factor names the compared axis --------------------------------
+    # The parser only recognizes a model axis under _CANONICAL_ALIASES
+    # ("model", "model_label", "model_name"), so comparing anything else --
+    # conditions, apps, agents -- used to be impossible here: the column went
+    # unrecognized and the load failed. Carry it in the model slot and keep
+    # the compared axis named as the user named it everywhere it is printed.
+    factor_singular, factor_plural = "model", "models"
+    factor_arg = getattr(args, "factor", None)
+    if factor_arg:
+        if factor_arg not in df.columns:
+            _die(
+                f"--factor '{factor_arg}' is not a column in this file.\n"
+                f"  Available columns: {list(df.columns)}"
+            )
+        if factor_arg.strip().lower() not in _CANONICAL_ALIASES["model"]:
+            clashes = [
+                c for c in df.columns
+                if c != factor_arg and c.strip().lower() in _CANONICAL_ALIASES["model"]
+            ]
+            if clashes:
+                _die(
+                    f"--factor '{factor_arg}' cannot be used while column "
+                    f"'{clashes[0]}' is present: evalstats reads that one as the "
+                    "compared axis too. Rename or drop one of them."
+                )
+            df = df.rename(columns={factor_arg: "model"})
+        factor_singular = factor_arg
+        factor_plural = f"{factor_arg}s" if not factor_arg.endswith("s") else factor_arg
 
     try:
         result, report = from_dataframe(
@@ -741,19 +772,21 @@ def _cmd_analyze(args: argparse.Namespace) -> None:
     if isinstance(result, MultiModelBenchmark):
         runs_str = f" × {result.n_runs} runs" if result.n_runs > 1 else ""
         evals_str = f" × {result.n_evaluators} evaluators" if result.n_evaluators > 1 else ""
+        prompts_str = f"{result.n_templates} prompts × " if result.n_templates > 1 else ""
         print(
-            f"  MultiModelBenchmark: {result.n_models} models × "
-            f"{result.n_templates} prompts × {result.n_inputs} inputs{runs_str}{evals_str}"
+            f"  Parsed: {result.n_models} {factor_plural} × "
+            f"{prompts_str}{result.n_inputs} inputs{runs_str}{evals_str}"
         )
-        print(f"  Models:    {result.model_labels}")
-        print(f"  Prompts:   {result.template_labels}")
+        print(f"  {factor_plural.capitalize() + ':':<10} {result.model_labels}")
+        if result.n_templates > 1:
+            print(f"  Prompts:   {result.template_labels}")
         if result.n_evaluators > 1:
             print(f"  Evaluators: {result.evaluator_names}")
     else:
         runs_str = f" × {result.n_runs} runs" if result.n_runs > 1 else ""
         evals_str = f" × {result.n_evaluators} evaluators" if result.n_evaluators > 1 else ""
         print(
-            f"  BenchmarkResult: {result.n_templates} prompts × "
+            f"  Parsed: {result.n_templates} prompts × "
             f"{result.n_inputs} inputs{runs_str}{evals_str}"
         )
         print(f"  Prompts:   {result.template_labels}")
@@ -829,6 +862,8 @@ def _cmd_analyze(args: argparse.Namespace) -> None:
                 top_pairwise=args.top_pairwise,
                 style=getattr(args, "ci_style", "gradient"),
                 show_rank_probabilities=getattr(args, "show_rank_probabilities", False),
+                factor_singular=factor_singular,
+                factor_plural=factor_plural,
             )
     summary_text = summary_buffer.getvalue()
     print(summary_text, end="")
