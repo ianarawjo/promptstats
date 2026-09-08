@@ -496,8 +496,8 @@ def print_pairwise_summary(
     ci_legend = _legend_ci_label(style, ci_pct, pair.multi_ci is not None)
     mean_marker = _mean_marker_legend(style, pair.statistic)
     print(
-        f"  axis: [{axis_low:+.3f}, {axis_high:+.3f}]  "
-        f"(· ±1σ spread, {ci_legend}{mean_marker}, │ zero)"
+        f"{_DIM}  axis: [{axis_low:+.3f}, {axis_high:+.3f}]  "
+        f"(· ±1σ spread, {ci_legend}{mean_marker}, │ zero){_RESET}"
     )
     print(f"  {b} (<0) {line} (>0) {a}")
     print()
@@ -851,8 +851,8 @@ def _print_multi_model_summary(
     _ci_legend_mm = _legend_ci_label(style, int(round((1 - get_alpha_ci()) * 100)), cross_rob.multi_ci is not None)
     _mean_marker_mm = _mean_marker_legend(style, stat_label.lower())
     print(
-        f"  axis: [{ma_low:.3f}, {ma_high:.3f}]  "
-        f"(· ±1σ, {_ci_legend_mm}{_mean_marker_mm}, │ {ref_label_str})"
+        f"{_DIM}  axis: [{ma_low:.3f}, {ma_high:.3f}]  "
+        f"(· ±1σ, {_ci_legend_mm}{_mean_marker_mm}, │ {ref_label_str}){_RESET}"
     )
     print(
         f"  {factor_singular.capitalize():<{model_col_width}s} "
@@ -1738,9 +1738,9 @@ def _print_pairwise_section(
         _pair_ci_legend = _legend_ci_label(style, _pair_ci_pct, _any_multi_ci)
         _pair_mean_marker = _mean_marker_legend(style, pair_stat_label.lower())
         print(
-            f"  legend: (· ±1σ, {_pair_ci_legend}{_pair_mean_marker}, │ zero)    "
+            f"{_DIM}  legend: (· ±1σ, {_pair_ci_legend}{_pair_mean_marker}, │ zero)    "
             f"axis: [{pair_low:+.3f}, {pair_high:+.3f}]    "
-            f"effect: {meta['effect_label']}"
+            f"effect: {meta['effect_label']}{_RESET}"
         )
         header = (
             f"  {'Left':<{pair_item_col_width}s} {'Right':<{pair_item_col_width}s} "
@@ -1945,8 +1945,8 @@ def _print_mean_advantage(
     _ci_legend_ma = _legend_ci_label(style, ci_pct, _any_multi_ci)
     _mean_marker_ma = _mean_marker_legend(style, stat_label.lower())
     print(
-        f"  axis: [{ma_low:.3f}, {ma_high:.3f}]"
-        f"  (· ±1σ, {_ci_legend_ma}{_mean_marker_ma}, │ {ref_label})"
+        f"{_DIM}  axis: [{ma_low:.3f}, {ma_high:.3f}]"
+        f"  (· ±1σ, {_ci_legend_ma}{_mean_marker_ma}, │ {ref_label}){_RESET}"
     )
     _show_neff = (
         n_eff_per_entity is not None
@@ -2633,8 +2633,8 @@ def _print_factorial_lmm_summary(
             _ci_legend_mm = _legend_ci_label(style, ci_pct, style == "gradient")
             _mean_marker_lmm = _mean_marker_legend(style, "mean")
             print(
-                f"  axis: [{axis_low:+.3f}, {axis_high:+.3f}]  "
-                f"(· ±SE, {_ci_legend_mm}{_mean_marker_lmm}, │ factor mean)"
+                f"{_DIM}  axis: [{axis_low:+.3f}, {axis_high:+.3f}]  "
+                f"(· ±SE, {_ci_legend_mm}{_mean_marker_lmm}, │ factor mean){_RESET}"
             )
             print(
                 f"  {'Level':<{level_w}s} {'Interval Plot':<{line_width}s} "
