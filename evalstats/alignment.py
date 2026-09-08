@@ -36,7 +36,7 @@ class AlignmentResult:
         Column name of the human-label scores.
     score_type : str
         Detected score type: ``"binary"``, ``"likert"``, ``"continuous"``,
-        or ``"grade"``.
+.
     n_labeled : int
         Number of items with human labels (alignment set size).
     n_total : int
@@ -58,7 +58,7 @@ class AlignmentResult:
         Representativeness check results (distribution, slice columns, and
         label-position contiguity).
     bias_check : dict or None
-        For likert/continuous/grade score types, compares the correlation-type
+        For likert/continuous score types, compares the correlation-type
         metric (weighted κ or Pearson r) against ICC(2,1) to flag whether the
         judge is systematically biased in absolute scale despite tracking
         human relative ordering.  ``None`` for binary score types, where ICC
@@ -193,7 +193,7 @@ class AlignmentResult:
                 idx = rng.choice(n_cats, p=cat_probs)
                 imputed[i] = float(human_cats[idx])
 
-        else:  # "continuous" or "grade"
+        else:  # "continuous"
             # Sample (intercept, slope, σ²) from Normal-Inverse-Gamma posterior
             # σ² ~ InvGamma(an, bn); coefs | σ² ~ N(mun, σ² * Vn)
             sigma2 = 1.0 / rng.gamma(shape=cal["an"], scale=1.0 / cal["bn"])
@@ -513,9 +513,6 @@ _SCORE_TYPE_NOTES = {
     ),
     "continuous": (
         "labels are on a continuous scale, so correlation metrics are used"
-    ),
-    "grade": (
-        "labels are numeric grades, so correlation metrics are used"
     ),
 }
 
@@ -951,7 +948,7 @@ def _compute_alignment_metrics(
                 icc_est, gap_est, gap_lo, gap_hi,
             )
 
-    else:  # continuous / grade
+    else:  # continuous
         def pe(a, b):
             r, _ = pearsonr(a, b)
             return float(r)
@@ -1046,7 +1043,6 @@ _PRIMARY_ALIGNMENT_KEY = {
     "binary": "cohens_kappa",
     "likert": "weighted_kappa",
     "continuous": "pearson_r",
-    "grade": "pearson_r",
 }
 
 # Below this many labeled items in a single condition, the primary metric
@@ -1736,9 +1732,9 @@ def _judge_alignment_core(
 def _resolve_per_condition_col(evaldata, df, factors) -> Optional[str]:
     """Pick the column whose per-condition alignment breakdown to report.
 
-    In order: an explicit ``factors=``, the "model" role column, then the sole
-    factor column. Raises with two or more factor columns and no "model" role,
-    since there is then no single right grouping to pick.
+    In order: an explicit ``factors=``, the column declared to ``load_from``,
+    the "model" role column, then the sole factor column. Raises when that
+    leaves two or more candidates, since there is then no right grouping to pick.
     """
     if factors is not None:
         if isinstance(factors, (list, tuple)):
@@ -1755,11 +1751,16 @@ def _resolve_per_condition_col(evaldata, df, factors) -> Optional[str]:
             )
         return factors
 
+    declared = [c for c in (getattr(evaldata, "_declared_factors", None) or [])
+                if c in df.columns]
+    if len(declared) == 1:
+        return declared[0]
+
     model_col = evaldata._col.get("model")
     if model_col is not None:
         return model_col
 
-    factor_cols = [c for c in (getattr(evaldata, "_factor_cols", None) or [])
+    factor_cols = [c for c in (declared or getattr(evaldata, "_factor_cols", None) or [])
                    if c in df.columns]
     if len(factor_cols) == 1:
         return factor_cols[0]
@@ -2752,7 +2753,7 @@ def judge_alignment(
         that shouldn't just be ``judge_scores_or_evaldata`` itself.
     score_type : str, optional
         Form 2 only: override the auto-detected score type (``"binary"``,
-        ``"likert"``, ``"continuous"``, or ``"grade"``). Auto-detected from
+        ``"likert"``, or ``"continuous"``). Auto-detected from
         the labeled judge scores when not given.
     alpha : float
         Significance level for alignment metric CIs.  Default ``0.05``.

@@ -54,6 +54,7 @@ import pandas as pd
 from evalstats.config import resolve_auto_unpaired_methods, get_alpha_ci
 from evalstats.core.stats_utils import correct_pvalues
 from evalstats.loader import _CANONICAL_ALIASES, _find_col, _detect_score_type
+from evalstats.labeling import VALID_SCORE_TYPES
 
 if TYPE_CHECKING:
     from evalstats.alignment import AlignmentResult
@@ -220,7 +221,7 @@ class GroupComparisonResult:
     metric_col: str
     item_col: str
     item_col_synthetic: bool
-    score_type: str          # "binary" | "continuous" | "likert" | "grade"
+    score_type: str          # "binary" | "continuous" | "likert"
     family: str              # "binary_proportion" | "rank_based"
     groups: list[GroupStat]
     pairwise: list[GroupDiffResult]
@@ -862,6 +863,7 @@ def compare_unpaired(
     rng=None,
     score_range: Optional[tuple[float, float]] = None,
     eval_type: Optional[str] = None,
+    score_type: Optional[str] = None,
     correction: Optional[str] = None,
     p_values: bool = True,
     omnibus: bool = True,
@@ -977,7 +979,16 @@ def compare_unpaired(
             "need at least 2 groups to compare."
         )
 
-    score_type = _detect_score_type(df[metric_col].dropna())
+    # A declared score type wins over detection. Detection reads the sample and
+    # can only ever guess: a 1-5 rubric that happens to contain no 1s looks the
+    # same as a 2-5 one, and the family it picks decides whether groups are
+    # compared as proportions or as ranks.
+    if score_type is None:
+        score_type = _detect_score_type(df[metric_col].dropna())
+    elif score_type not in VALID_SCORE_TYPES:
+        raise ValueError(
+            f"score_type must be one of {sorted(VALID_SCORE_TYPES)}, got {score_type!r}"
+        )
     family, _, _ = resolve_auto_unpaired_methods(score_type)
 
     # A judged SECONDARY metric is not supported and must not fail quietly.

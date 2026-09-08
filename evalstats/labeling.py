@@ -53,7 +53,7 @@ SYNTHETIC_ITEM_COL = "_row_item"
 # "<prefix><metric>".
 GENERIC_LABEL_KEY = "label"
 
-VALID_SCORE_TYPES = ("binary", "likert", "continuous", "grade")
+VALID_SCORE_TYPES = ("binary", "likert", "continuous")
 
 # Mirrors the n_all < 50 floor _run_alignment_ppi() enforces in api.py ("PPI
 # is only beneficial at scale"). Kept as a local constant rather than a
@@ -363,8 +363,6 @@ def _prompt_for_grade(score_type: str, metric_name: str, in_: Callable[[str], st
         hint = "1=pass / 0=fail"
     elif score_type == "likert":
         hint = "small integer, e.g. 1-5"
-    elif score_type == "grade":
-        hint = "0-100"
     else:
         hint = "numeric score"
 
@@ -384,9 +382,6 @@ def _prompt_for_grade(score_type: str, metric_name: str, in_: Callable[[str], st
             continue
         if score_type == "likert" and not (1 <= val <= 10):
             print("    likert metric -- enter a small positive integer")
-            continue
-        if score_type == "grade" and not (0 <= val <= 100):
-            print("    grade metric -- enter 0-100")
             continue
         return val
 

@@ -312,7 +312,7 @@ class TestCompareUnpairedNaNAndPPIGuards:
 
     def test_routing_table_family_drives_dispatch(self):
         from evalstats.config import resolve_auto_unpaired_methods
-        for score_type in ["binary", "continuous", "likert", "grade"]:
+        for score_type in ["binary", "continuous", "likert"]:
             family, omnibus_method, pairwise_method = resolve_auto_unpaired_methods(score_type)
             assert family in ("binary_proportion", "rank_based")
             if score_type == "binary":

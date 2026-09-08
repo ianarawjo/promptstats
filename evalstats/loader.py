@@ -16,7 +16,8 @@ from typing import Literal, Optional, Union
 import numpy as np
 import pandas as pd
 
-ScoreType = Literal["binary", "continuous", "likert", "grade"]
+ScoreType = Literal["binary", "continuous", "likert"]
+_VALID_SCORE_TYPES = frozenset({"binary", "continuous", "likert"})
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Canonical column aliases
@@ -57,16 +58,15 @@ def _detect_score_type(series: pd.Series) -> ScoreType:
     if unique <= {0.0, 1.0}:
         return "binary"
 
-    # All whole numbers?
+    # Likert means discrete here: whole numbers on a scale that starts at or
+    # above zero. The width is not capped, since a 0-25 rubric is as ordinal as
+    # a 1-5 one. Negative values are excluded because a rating scale running
+    # below zero is not a rating scale; that data reads as continuous instead.
+    # A metric that is only incidentally whole-numbered is declared with
+    # score_type="continuous".
     all_int = bool(np.all(vals == np.floor(vals)))
-    if all_int:
-        imin, imax = int(vals.min()), int(vals.max())
-        # Likert: positive integers, small range (1–10)
-        if imin >= 1 and imax <= 10:
-            return "likert"
-        # Grade: non-negative integers up to 100
-        if imin >= 0 and imax <= 100:
-            return "grade"
+    if all_int and float(vals.min()) >= 0.0:
+        return "likert"
 
     # Continuous: floats bounded in [0, 1]
     if float(vals.min()) >= 0.0 and float(vals.max()) <= 1.0:
@@ -148,12 +148,17 @@ class EvalResults:
         metric_cols: list[str],
         col: dict[str, Optional[str]],
         factor_cols: list[str],
+        declared_factors: Optional[list[str]] = None,
+        declared_score_types: Optional[dict[str, str]] = None,
     ):
         self._df = df
         self._score_types = score_types       # metric_col → score_type
         self._metric_cols = metric_cols       # ordered list of metric column names
         self._col = col                       # role → actual col name (or None)
         self._factor_cols = factor_cols       # non-canonical, non-metric columns
+        self._declared_factors = list(declared_factors or [])  # named via factors=
+        # Types the caller stated, as opposed to ones detected from the sample.
+        self._declared_score_types = dict(declared_score_types or {})
 
     # ── public properties ────────────────────────────────────────────────────
 
@@ -534,6 +539,7 @@ def load_from(
     *,
     metric_cols: Optional[Union[str, list[str], dict[str, str]]] = None,
     col_map: Optional[dict[str, str]] = None,
+    factors: Optional[Union[str, list[str]]] = None,
 ) -> EvalResults:
     """Parse evaluation results into an :class:`EvalResults` object.
 
@@ -550,13 +556,18 @@ def load_from(
         * ``str`` — a single metric column name.
         * ``list[str]`` — multiple metric columns.
         * ``dict[str, str]`` — keys are metric column names, values are
-          explicit score types (``"binary"``, ``"continuous"``, ``"likert"``,
-          ``"grade"``).
+          explicit score types (``"binary"``, ``"continuous"``, ``"likert"``).
 
         When omitted, :func:`load_from` infers the metric column(s).
     col_map : dict[str, str], optional
         Rename non-canonical column names to canonical ones before loading.
         E.g. ``{"llm": "model", "template": "prompt", "q_id": "item"}``.
+    factors : str or list[str], optional
+        Column(s) that vary the condition being compared, for data whose factor
+        is not one of the canonical roles. Naming them here makes them part of
+        the key identifying a row, so a within-subjects design that scores the
+        same item under several conditions loads without renaming anything.
+        Pass the same name to :func:`~evalstats.compare`'s ``factors=``.
 
     Returns
     -------
@@ -702,6 +713,11 @@ def load_from(
     for mc in resolved:
         if mc in explicit_score_types:
             declared = explicit_score_types[mc]
+            if declared not in _VALID_SCORE_TYPES:
+                raise EvalLoadError(
+                    f"Column '{mc}' declared as score type {declared!r}, which is "
+                    f"not one of {sorted(_VALID_SCORE_TYPES)}."
+                )
             detected = _detect_score_type(df[mc])
             # Warn if explicit type disagrees with detected type for strict cases.
             if declared == "binary" and detected != "binary":
@@ -714,8 +730,21 @@ def load_from(
             score_types[mc] = _detect_score_type(df[mc])
 
     # ── check for duplicates ─────────────────────────────────────────────────
+    # Declared factors join the key. Without them, a within-subjects design that
+    # scores the same item under several conditions looks like duplicate items.
+    # Only declared ones: every other leftover column is also in `factor_cols`
+    # below, and putting a per-row column such as a word count in the key would
+    # make almost every row unique and stop this check catching anything.
+    declared_factors = [factors] if isinstance(factors, str) else list(factors or [])
+    missing = [c for c in declared_factors if c not in df.columns]
+    if missing:
+        raise EvalLoadError(
+            f"factors={missing!r} not found in the data. "
+            f"Available columns: {list(df.columns)}"
+        )
     key_parts = [c for c in [col.get("model"), col.get("prompt"), col.get("item")]
                  if c and c in df]
+    key_parts += [c for c in declared_factors if c not in key_parts]
     if key_parts:
         _check_duplicates(df, key_parts, run_col=col.get("run"))
 
@@ -725,6 +754,9 @@ def load_from(
         c for c in df.columns
         if c not in canonical_used and c not in metric_set
     ]
+    # Declared factors first, so anything picking "the" factor column finds the
+    # one the caller named rather than an incidental leftover.
+    factor_cols.sort(key=lambda c: (c not in declared_factors, list(df.columns).index(c)))
 
     return EvalResults(
         df=df,
@@ -732,4 +764,6 @@ def load_from(
         metric_cols=resolved,
         col=col,
         factor_cols=factor_cols,
+        declared_factors=declared_factors,
+        declared_score_types=dict(explicit_score_types),
     )

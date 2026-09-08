@@ -524,7 +524,7 @@ def resolve_auto_pvalue_correction_method(n: int, *, lopsided_binary: bool = Fal
 # Separate from AUTO_ANALYZE_METHOD_TABLE above (which is paired-only): that
 # table's data_kind taxonomy ("binary"/"bounded_01"/"likert"/"unbounded") is
 # also different from the one used here ("binary"/"continuous"/"likert"/
-# "grade", matching evalstats.loader._detect_score_type -- kept local rather
+# matching evalstats.loader._detect_score_type -- kept local rather
 # than imported to avoid coupling this low-level module to the loader, same
 # reasoning as DataKind above being declared locally rather than imported).
 #
@@ -545,7 +545,7 @@ def resolve_auto_pvalue_correction_method(n: int, *, lopsided_binary: bool = Fal
 #   data -- there is no between-subjects Tango equivalent today). A
 #   deliberate patch, not a clean solution.
 #
-#   continuous / likert / grade -> kruskalwallis (omnibus + θ_ab pairwise
+#   continuous / likert -> kruskalwallis (omnibus + θ_ab pairwise
 #   post-hoc) + mannwhitney (the k=2 special case -- Kruskal-Wallis reduces
 #   to Mann-Whitney at k=2). Reports a stochastic-dominance probability
 #   θ=P(a>b), not a mean difference -- less immediately interpretable for
@@ -553,10 +553,9 @@ def resolve_auto_pvalue_correction_method(n: int, *, lopsided_binary: bool = Fal
 #   multi-group (k>=3) pairwise mechanism in the codebase for any score
 #   type; a Tukey-HSD-style joint mean-difference post-hoc for continuous
 #   data does not exist and would itself be new, unvalidated work.
-#   "grade" is treated as "continuous" here (closest existing behavior) --
 #   flagged as an assumption needing real-data validation, not a settled
 #   choice (see PLAN §5).
-UnpairedScoreType = Literal["binary", "continuous", "likert", "grade"]
+UnpairedScoreType = Literal["binary", "continuous", "likert"]
 UnpairedFamily = Literal["binary_proportion", "rank_based"]
 
 
@@ -608,14 +607,6 @@ AUTO_UNPAIRED_METHOD_TABLE: tuple[AutoUnpairedRule, ...] = (
             "convention, so Kruskal-Wallis/Mann-Whitney stay the tests. The "
             "reported effect is the mean difference (Welch interval); see "
             "the 'continuous' row for why the estimand is a mean."
-        ),
-    ),
-    AutoUnpairedRule(
-        score_type="grade", family="rank_based",
-        omnibus_method="kruskalwallis", pairwise_method="mannwhitney",
-        reason=(
-            "Treated as continuous for this table (closest existing "
-            "behavior) -- unvalidated assumption, see PLAN §5."
         ),
     ),
 )

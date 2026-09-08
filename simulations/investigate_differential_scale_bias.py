@@ -55,7 +55,7 @@ def run(seed, true_diff, slope_b, slope_s):
         rows.append({"item": f"i{i}", "condition": "baseline", "score": jb[i], "human_score": hb[i]})
         rows.append({"item": f"i{i}", "condition": "skill", "score": js[i], "human_score": hs[i]})
     df = pd.DataFrame(rows).sample(frac=1, random_state=seed).reset_index(drop=True)
-    ed = es.load_from(df, metric_cols={"score": "grade"}, col_map={"condition": "model"})
+    ed = es.load_from(df, metric_cols={"score": "likert"}, col_map={"condition": "model"})
     naive = es.compare(ed, factors="model", metric="score", score_range=(0, 25), design="paired")
     ar = es.judge_alignment(ed, llm_metric="score", human_groundtruth="human_score",
                             selection="random")

@@ -495,7 +495,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--score-type",
         nargs="+",
         default=None,
-        choices=["binary", "likert", "continuous", "grade"],
+        choices=["binary", "likert", "continuous"],
         metavar="TYPE",
         help=(
             "Declare the grading scale for --interactive, instead of auto-detecting "

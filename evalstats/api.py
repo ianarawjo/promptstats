@@ -896,8 +896,31 @@ _ANALYZE_PARAMS = {
     "evaluator_mode", "reference", "method", "backend", "n_bootstrap",
     "correction", "spread_percentiles", "failure_threshold", "rng", "statistic",
     "template_model_collapse", "simultaneous_ci", "omnibus", "p_values",
-    "pairwise_test", "ci_style", "score_range", "eval_type",
+    "pairwise_test", "ci_style", "score_range", "eval_type", "score_type",
 }
+
+
+# score_type says what the data IS; the router's CI selection asks a narrower
+# question -- for bounded numeric data, is the discreteness meaningful. Both
+# discrete types answer "yes", and binary never reaches that fork.
+_SCORE_TYPE_TO_EVAL_TYPE = {
+    "binary": None, "likert": "likert", "continuous": "continuous",
+}
+
+
+def _resolve_score_type(engine_kwargs: dict, evaldata, metric_col):
+    """The score type to use: an explicit score_type=, else eval_type= read as
+    one, else whatever the caller declared to load_from(). Detection stays the
+    fallback and happens downstream."""
+    st = engine_kwargs.get("score_type")
+    if st is None:
+        et = engine_kwargs.get("eval_type")
+        if et in ("likert", "continuous"):
+            st = et
+    if st is None and evaldata is not None:
+        declared = getattr(evaldata, "_declared_score_types", None) or {}
+        st = declared.get(metric_col)
+    return st
 
 
 def _bridge_to_io(
@@ -1244,6 +1267,22 @@ def compare(
 
     # ── split kwargs into column filters vs. engine kwargs ────────────────────
     df, engine_kwargs = _apply_kwarg_filters(df, kwargs, _ANALYZE_PARAMS)
+
+    # One declared score type steers both engines. It sets the between-subjects
+    # family directly, and the router asks its narrower discreteness question
+    # through eval_type, which every score type answers.
+    _score_type = _resolve_score_type(engine_kwargs, evaldata, metric_col)
+    if _score_type is not None:
+        if _score_type not in _SCORE_TYPE_TO_EVAL_TYPE:
+            raise ValueError(
+                f"score_type must be one of {sorted(_SCORE_TYPE_TO_EVAL_TYPE)}, "
+                f"got {_score_type!r}"
+            )
+        # Only eval_type travels in engine_kwargs: that is what the paired
+        # router understands. The between-subjects engine takes score_type
+        # directly, below.
+        engine_kwargs["eval_type"] = _SCORE_TYPE_TO_EVAL_TYPE[_score_type]
+    engine_kwargs.pop("score_type", None)
     # Reproducible by default. Every downstream engine reads its generator from
     # engine_kwargs["rng"], so seeding once here covers the paired, unpaired,
     # multi-run and PPI paths alike. A caller who passes rng= explicitly keeps
@@ -1395,6 +1434,7 @@ def compare(
                     rng=engine_kwargs.get("rng"),
                     score_range=engine_kwargs.get("score_range"),
                     eval_type=engine_kwargs.get("eval_type"),
+                    score_type=_score_type,
                     correction=engine_kwargs.get("correction"),
                     p_values=_up_p_values, omnibus=_up_omnibus,
                     secondary_metric=secondary_metric,

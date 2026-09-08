@@ -68,8 +68,9 @@ def make_group_df(score_type, means, n_per_group, seed):
                 probs = np.exp(-0.5 * ((cats - center) / 1.1) ** 2)
                 probs /= probs.sum()
                 score = float(rng.choice(cats, p=probs))
-            elif score_type == "grade":
-                score = float(np.clip(rng.normal(mean * 100, 15), 0, 100))
+            elif score_type == "wide_ordinal":
+                # 0-100 whole numbers: still the discrete path, just a wide scale.
+                score = float(np.clip(np.round(rng.normal(mean * 100, 15)), 0, 100))
             else:
                 raise ValueError(score_type)
             rows.append({"group": g, "item": f"{g}_{i}", "score": score})
@@ -98,7 +99,7 @@ def run_crash_grid():
     print("=" * 78)
     print("PART 1: crash/sanity grid")
     print("=" * 78)
-    score_types = ["binary", "continuous", "likert", "grade"]
+    score_types = ["binary", "continuous", "likert", "wide_ordinal"]
     k_values = [2, 3, 4, 6]
     balance_modes = ["balanced", "unbalanced"]
     ppi_modes = [False, True]
