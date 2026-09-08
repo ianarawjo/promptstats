@@ -2504,6 +2504,32 @@ def _pair_total_n(conditions: dict, names: list, design: str) -> int:
     return sum(len(np.asarray(conditions[n][0])) for n in names)
 
 
+def _full_linearized_n(conditions: dict, *, test: str, design: Optional[str]) -> int:
+    """The savings formula's total item count, in the SAME units as the
+    linearized arrays whose correlation feeds it.
+
+    ``_pair_total_n`` counts items, which is right whenever a test's
+    linearization emits one number per item (``ttest``/``wilcoxon`` score
+    differences; the between-design tests emit one per observation, and its
+    ``design="between"`` branch sums to match). ``friedman`` is the exception:
+    ``_linearize_friedman`` ravels an (items x k) matrix, so its labeled count
+    is ``k`` times the item count. Pairing that with an item-scale total made
+    ``n_lab/N`` about ``k`` times too large, collapsing the multiplier toward 1
+    and reporting an ``n_eff`` on the wrong scale.
+
+    Relabeling every human score as observed and re-linearizing gives the
+    length the arrays would have under full labeling -- correct for any test,
+    without a per-test table of emission rates. Only lengths are read, so the
+    placeholder value never reaches a correlation.
+    """
+    full = {}
+    for name, (judge, human) in conditions.items():
+        human = np.asarray(human, dtype=float)
+        full[name] = (np.asarray(judge, dtype=float), np.zeros_like(human))
+    judge_full, _, _ = _linearize_for_test(full, test=test, design=design)
+    return int(len(judge_full))
+
+
 def _attach_savings(metric: dict, N: int) -> dict:
     """Attach multiplier/n_eff to a correlation metric dict, using `N`
     (see :func:`_pair_total_n`) as the savings formula's total item count.
@@ -2612,7 +2638,7 @@ def _judge_alignment_pairwise(
                 test_pairwise_metrics[(name_a, name_b)] = _attach_savings(m, pair_n)
         else:
             jl, hl, _ = _linearize_for_test(conditions, test=test, design=resolved_design)
-            whole_n = _pair_total_n(conditions, names, resolved_design)
+            whole_n = _full_linearized_n(conditions, test=test, design=resolved_design)
             m = _single_metric(
                 jl, hl, alpha=alpha, rng=rng, label=f"{test} rho (whole-design)",
                 why=f"{test}'s own validated correlation across all conditions at once -- not decomposable into pairs.",

@@ -1111,6 +1111,66 @@ class TestMultiConditionAlignment:
         assert len(r.pairwise_metrics) == 3    # raw pairwise still reported
         assert np.isfinite(r.omnibus_metric["n_eff"])
 
+    @pytest.mark.parametrize("test,design", [
+        ("friedman", "within"), ("kruskalwallis", "between"), ("anova_oneway", "between"),
+    ])
+    def test_omnibus_multiplier_matches_savings_formula(self, test, design):
+        """The omnibus multiplier obeys 1/(1 - rho^2 (1 - n_lab/N)) with both
+        counts on ONE scale, and n_eff stays on the scale of its own labeled
+        count. Regression: friedman's linearization emits k numbers per item,
+        so pairing it with the item-scale _pair_total_n drove n_lab/N about k
+        times too high, flattening the multiplier to ~1 while n_eff was read
+        as per-condition -- a ~3x overstatement of the reported label savings.
+        """
+        rng = _rng(11)
+        n, n_lab, k = 80, 25, 3
+        conds = {}
+        for i in range(k):
+            human = rng.normal(size=n)
+            judge = 0.7 * human + rng.normal(size=n) * 0.7
+            human = human.copy()
+            human[n_lab:] = np.nan
+            conds[f"c{i}"] = (judge, human)
+        kw = {"design": design} if test == "anova_oneway" else {}
+        r = judge_alignment(conds, test=test, selection="random", ci=False, **kw)
+        m = r.omnibus_metric
+
+        # n_lab and N must share a scale, so their ratio is the labeled fraction.
+        assert m["n"] / m["N"] == pytest.approx(n_lab / n, rel=1e-9)
+        expected = 1.0 / (1.0 - m["estimate"] ** 2 * (1.0 - n_lab / n))
+        assert m["multiplier"] == pytest.approx(expected, rel=1e-9)
+        assert m["n_eff"] == pytest.approx(m["multiplier"] * m["n"], rel=1e-9)
+        # PPI can only ever add information.
+        assert 1.0 <= m["multiplier"] < 1.0 / (1.0 - (1.0 - n_lab / n))
+
+    def test_full_linearized_n_only_differs_for_friedman(self):
+        """_full_linearized_n replaces _pair_total_n, so it must agree with it
+        everywhere the old count was already on the linearization's scale."""
+        from evalstats.alignment import _full_linearized_n, _pair_total_n
+
+        rng = _rng(12)
+        conds = {}
+        for i in range(3):
+            human = rng.normal(size=40)
+            judge = 0.6 * human + rng.normal(size=40) * 0.8
+            human = human.copy()
+            human[12:] = np.nan
+            conds[f"c{i}"] = (judge, human)
+        names = list(conds)
+        for test, design, same in [
+            ("wilcoxon", "within", True), ("ttest", "within", True),
+            ("mannwhitney", "between", True), ("kruskalwallis", "between", True),
+            ("anova_oneway", "between", True), ("friedman", "within", False),
+        ]:
+            sub = conds if test in ("friedman", "kruskalwallis", "anova_oneway") else \
+                {nm: conds[nm] for nm in names[:2]}
+            full = _full_linearized_n(sub, test=test, design=design)
+            pair = _pair_total_n(sub, list(sub), design)
+            if same:
+                assert full == pair, f"{test}/{design}: {full} != {pair}"
+            else:
+                assert full == pair * len(sub), f"{test}/{design}: {full} != {pair}*{len(sub)}"
+
     def test_per_condition_counts_reported(self):
         conds = _cond(_rng(9), n=400, n_lab=120)
         r = judge_alignment(conds, design="between", selection="random")

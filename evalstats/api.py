@@ -2501,10 +2501,10 @@ def _run_alignment_ppi(
     # ── Label efficiency for the corrected estimates ──────────────────────
     #
     # Attached to `cr` for the summary to render. Within-subjects, so every
-    # correlation is a "within" one and n_eff comes back against a single
-    # condition's item count (_pair_total_n returns one condition's length for
-    # design="within", since all conditions share the same items) -- no
-    # division by condition count here, unlike the between-subjects path.
+    # correlation is a "within" one and n_eff comes back on the scale of that
+    # test's linearized arrays. The marginal and pairwise rows score one number
+    # per item, so their n_eff is already per condition; Friedman's spans all k
+    # conditions and is divided below, as the between-subjects path does.
     #
     # Three different estimands, three different correlations, deliberately:
     #   marginal mean  -> that entity's own Pearson r^2 (mean influence
@@ -2534,7 +2534,12 @@ def _run_alignment_ppi(
         if len(labels) >= 3:
             _om, _ = _efficiency_metric(_conds, test="friedman", design="within",
                                         want_pairs=False)
-            cr._omnibus_eff = _om
+            # Friedman's linearization emits one number per (item, condition),
+            # so its n_eff spans all k conditions; the display reports labels
+            # per condition. The pairwise rows above need no such divisor --
+            # they score one difference per item already.
+            if _om is not None:
+                cr._omnibus_eff = (_om[0], _om[1] / len(labels))
         _counts = [int(np.count_nonzero(~np.isnan(lab_matrix[i]))) for i in range(len(labels))]
         cr._n_lab_per_entity = float(np.mean(_counts)) if _counts else None
         # _print_bundle_summary is handed the bundle, not the ComparisonResult,
