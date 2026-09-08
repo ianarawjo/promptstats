@@ -591,7 +591,9 @@ class TestCompareUnpairedWithPPI:
         """
         for seed in range(6):
             df = _make_unpaired_with_alignment(
-                {"A": 0.4, "B": 0.6}, n_per_group=30, n_labeled_per_group=8, seed=seed,
+                # 15/group is the PPI floor now; the covariance degeneracy this
+                # guards is seed-driven, not label-count-driven.
+                {"A": 0.4, "B": 0.6}, n_per_group=30, n_labeled_per_group=16, seed=seed,
             )
             evaldata = es.load_from(df, col_map={"model": "model", "item": "item"})
             with warnings_lib.catch_warnings():
@@ -981,3 +983,50 @@ class TestCompareDesignRouting:
                         alignment={"llm_score": ar})
         assert isinstance(r, GroupComparisonResult)
         assert r.ppi_applied is True
+
+
+class TestUnpairedRankBiserial:
+    """The unpaired pairwise table reports an effect size, and it is corrected
+    along with everything else when the metric is judge-corrected."""
+
+    def test_raw_es_is_two_theta(self):
+        from evalstats.tests import _midrank_theta
+        df = _make_unpaired_with_alignment({"A": 0.4, "B": 0.65}, n_per_group=50,
+                                           n_labeled_per_group=20, seed=3)
+        r = compare_unpaired(df.drop(columns=["human_score"]),
+                             factor_col="model", metric_col="llm_score", n_boot=200, rng=3)
+        pair = r.pairwise[0]
+        a = df[df["model"] == pair.label_a]["llm_score"].to_numpy(float)
+        b = df[df["model"] == pair.label_b]["llm_score"].to_numpy(float)
+        assert pair.rank_biserial == pytest.approx(2.0 * _midrank_theta(a, b), abs=1e-9)
+
+    def test_es_is_corrected_under_ppi(self):
+        """Raw and corrected must differ -- the whole point is that it no
+        longer reports a raw-judge number beside corrected intervals."""
+        df = _make_unpaired_with_alignment({"A": 0.4, "B": 0.65}, n_per_group=50,
+                                           n_labeled_per_group=20, seed=4)
+        with warnings_lib.catch_warnings():
+            warnings_lib.simplefilter("ignore")
+            evaldata = es.load_from(df, col_map={"model": "model", "item": "item"})
+            ar = judge_alignment(evaldata, llm_metric="llm_score", human_groundtruth="human_score")
+            ppi = compare_unpaired(df, factor_col="model", metric_col="llm_score",
+                                   alignment={"llm_score": ar}, n_boot=400, rng=4)
+        raw = compare_unpaired(df.drop(columns=["human_score"]), factor_col="model",
+                               metric_col="llm_score", n_boot=400, rng=4)
+        assert ppi.ppi_applied and not raw.ppi_applied
+        assert ppi.pairwise[0].rank_biserial is not None
+        assert ppi.pairwise[0].rank_biserial != pytest.approx(
+            raw.pairwise[0].rank_biserial, abs=1e-6)
+        assert -1.0 <= ppi.pairwise[0].rank_biserial <= 1.0
+
+    def test_es_column_is_printed(self, capsys):
+        df = _make_unpaired_with_alignment({"A": 0.4, "B": 0.65}, n_per_group=50,
+                                           n_labeled_per_group=20, seed=5)
+        r = compare_unpaired(df.drop(columns=["human_score"]),
+                             factor_col="model", metric_col="llm_score", n_boot=200, rng=5)
+        r.summary()
+        out = capsys.readouterr().out
+        pairwise = out.split("Pairwise Comparisons", 1)[1]
+        # header row is the one naming the columns, not the legend above it
+        header = next(l for l in pairwise.splitlines() if "CI Low" in l)
+        assert "ES" in header

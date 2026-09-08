@@ -256,7 +256,7 @@ def test_print_summary_multimodel_single_prompt_skips_degenerate_sections(capsys
     assert "Cross-model per-template comparison" not in out
     assert "Per-Model Summary" not in out
     # _print_loud_section banner-cases its text.
-    assert "MODEL-LEVEL COMPARISON" in out
+    assert "COMPARISON ACROSS 'MODEL'" in out
 
 
 def test_print_summary_includes_critical_difference_groups(capsys):

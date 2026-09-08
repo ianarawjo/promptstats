@@ -177,7 +177,7 @@ def test_cmd_analyze_runs_from_disk_for_csv_and_xlsx(tmp_path, monkeypatch, suff
         analysis_call.update({"benchmark": benchmark, **kwargs})
         return {"ok": True}
 
-    def fake_print_summary(analysis, top_pairwise, style, show_rank_probabilities=False):
+    def fake_print_summary(analysis, top_pairwise, style, show_rank_probabilities=False, **kwargs):
         summary_call.update(
             {
                 "analysis": analysis,
@@ -410,7 +410,7 @@ def test_cmd_analyze_routes_format_and_forwards_options(
         analysis_call.update({"benchmark": benchmark, **kwargs})
         return {"ok": True}
 
-    def fake_print_summary(analysis, top_pairwise, style, show_rank_probabilities=False):
+    def fake_print_summary(analysis, top_pairwise, style, show_rank_probabilities=False, **kwargs):
         summary_call.update(
             {
                 "analysis": analysis,
@@ -1146,3 +1146,66 @@ def test_unnamed_score_column_error_points_at_the_metric_flag(tmp_path, capsys):
         cli._cmd_analyze(_plain_args(csv_path))
     err = capsys.readouterr().err
     assert "--metric" in err and "expert_rating" in err
+
+
+# ---------------------------------------------------------------------------
+# --factor on the plain analyze path
+# ---------------------------------------------------------------------------
+
+def _condition_df() -> pd.DataFrame:
+    """A factor column named nothing the parser recognizes as an axis."""
+    return pd.DataFrame([
+        {"item": f"i{i}", "condition": c, "score": 1.0 + j}
+        for j, c in enumerate(["A", "B", "C"]) for i in range(_MOCK_N_INPUTS)
+    ])
+
+
+def test_factor_lets_the_plain_path_compare_a_non_model_column(tmp_path, capsys):
+    """The parser only knows a model axis under _CANONICAL_ALIASES, so before
+    --factor was honored here a 'condition' column simply failed to load."""
+    csv_path = tmp_path / "cond.csv"
+    _condition_df().to_csv(csv_path, index=False)
+
+    cli._cmd_analyze(_plain_args(csv_path, factor="condition", score_range=[1, 3]))
+    out = capsys.readouterr().out
+
+    assert "3 conditions" in out
+    assert "COMPARISON ACROSS 'CONDITION'" in out
+    assert "Condition leaderboard" in out
+
+
+def test_factor_never_leaks_the_internal_model_slot(tmp_path, capsys):
+    """The column is carried in the model slot to reach the parser; the user
+    named the axis something else and must never be shown the slot's name."""
+    csv_path = tmp_path / "cond.csv"
+    _condition_df().to_csv(csv_path, index=False)
+
+    cli._cmd_analyze(_plain_args(csv_path, factor="condition", score_range=[1, 3]))
+    out = capsys.readouterr().out
+
+    leaks = [ln for ln in out.splitlines() if "model" in ln.lower()]
+    assert not leaks, leaks
+
+
+def test_factor_rejects_a_column_that_is_not_there(tmp_path, capsys):
+    csv_path = tmp_path / "cond.csv"
+    _condition_df().to_csv(csv_path, index=False)
+    with pytest.raises(SystemExit):
+        cli._cmd_analyze(_plain_args(csv_path, factor="nope"))
+    assert "not a column" in capsys.readouterr().err
+
+
+def test_factor_rejects_a_clash_with_a_real_model_column(tmp_path, capsys):
+    csv_path = tmp_path / "clash.csv"
+    _condition_df().assign(model="m").to_csv(csv_path, index=False)
+    with pytest.raises(SystemExit):
+        cli._cmd_analyze(_plain_args(csv_path, factor="condition"))
+    assert "Rename or drop" in capsys.readouterr().err
+
+
+def test_default_axis_is_still_reported_as_models(tmp_path, capsys):
+    csv_path = tmp_path / "models.csv"
+    _condition_df().rename(columns={"condition": "model"}).to_csv(csv_path, index=False)
+    cli._cmd_analyze(_plain_args(csv_path, score_range=[1, 3]))
+    out = capsys.readouterr().out
+    assert "3 models" in out and "COMPARISON ACROSS 'MODEL'" in out

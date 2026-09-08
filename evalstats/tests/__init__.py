@@ -3438,13 +3438,21 @@ def _sanitize_multigroup_ppi_labels(
             "PPI bootstrap can undercover below 30 labels; consider labeling more subjects."
         )
     else:
-        n_effective = int(sum(np.sum(~np.isnan(lab_arr)) for lab_arr in labs))
+        # Per group, not pooled. Every group carries its own rectifier, so a
+        # pooled count let one group ride on another's labels -- 13/1/1 across
+        # three groups cleared a 15-label floor while two of the three had
+        # essentially nothing to correct with.
+        per_group = [int(np.sum(~np.isnan(lab_arr))) for lab_arr in labs]
+        n_effective = min(per_group)
+        short = [i + 1 for i, n in enumerate(per_group) if n < 15]
         min_msg = (
-            f"At least 15 human labels are required for PPI {test_label} "
-            f"(found {n_effective} across all groups)."
+            f"At least 15 human labels per group are required for PPI "
+            f"{test_label}; group(s) {short} have fewer "
+            f"(counts per group: {per_group}). Label more items in those "
+            "groups, or drop them from the comparison."
         )
         warn_msg = (
-            "Only {n} human labels were supplied across all groups. "
+            "Only {n} human labels in the smallest group. "
             "PPI bootstrap can undercover below 30 labels; consider labeling more items."
         )
 

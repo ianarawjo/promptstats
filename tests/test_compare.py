@@ -557,10 +557,10 @@ def _paired_ci_method(ev, **kwargs):
     with contextlib.redirect_stdout(io.StringIO()) as buf:
         es.compare(ev, factors="condition", metric="score", score_range=(1, 5),
                    design="paired", **kwargs).summary()
-    # The marginal section states its own CI method now, and it comes first;
-    # these tests are about the PAIRED one.
-    return [ln for ln in buf.getvalue().splitlines()
-            if "CI method:" in ln and "marginal" not in ln][0]
+    # Both sections state a CI method and the marginal one comes first, so
+    # scope to the pairwise block rather than matching on wording.
+    pairwise = buf.getvalue().split("Pairwise Comparisons", 1)[1]
+    return [ln for ln in pairwise.splitlines() if "CI method:" in ln][0]
 
 
 def test_compare_score_type_steers_the_paired_ci_method():

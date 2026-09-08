@@ -146,6 +146,14 @@ class GroupDiffResult:
     report: those are score-level, this is test-specific. None when the
     comparison is uncorrected, or when the alignment call could not supply it."""
 
+    rank_biserial: Optional[float] = None
+    """Independent-samples rank-biserial correlation, ``2*theta`` with
+    ``theta = P(X>Y) + 0.5*P(X=Y) - 0.5``. Same scale and interpretation bands
+    as the paired path's effect size, and the estimand Mann-Whitney's p-value
+    already tests. PPI-corrected when the comparison is: the corrected theta is
+    what the PPI MWU estimates, so the effect size never sits uncorrected
+    beside a corrected interval."""
+
     n_eff: Optional[float] = None
     """Effective human-label count PER CONDITION for this pair: how many
     hand-labeled items per condition would have matched this pair's precision.
@@ -253,6 +261,10 @@ class GroupComparisonResult:
     """Mean human labels actually collected per condition, for the
     "N_eff against what you collected" comparison the summary prints."""
     marginal_n_eff: Optional[list] = None
+    marginal_rho2: Optional[list] = None
+    """Per-group judge-human rho^2 for the marginal mean, beside marginal_n_eff.
+    The mean's influence function is the identity, so this is that group's own
+    Pearson r^2 -- not the test-specific rho^2 the pairwise rows carry."""
     """Per-group effective label count for the MARGINAL mean CIs, in `groups`
     order. A group's marginal mean spans only itself, so this needs no
     per-condition division. None unless every group produced one."""
@@ -1192,6 +1204,7 @@ def compare_unpaired(
     # entirely when the metric is not judge-corrected (there is no PPI variance
     # reduction to describe).
     _om_rho2 = _om_neff = _n_lab_per_cond = None
+    _marginal_rho2 = None
     _pair_eff = {}
     _marginal_neff = None
     if ppi_applied:
@@ -1201,18 +1214,38 @@ def compare_unpaired(
         # lab_arrays), and their estimand is a plain mean, so each group's own
         # Pearson r^2 governs. One number per group, spanning that group only.
         from evalstats.alignment import _marginal_efficiency
-        _marginal_neff = [
-            _marginal_efficiency(g, lab)[1]
-            for g, lab in zip(group_arrays, group_lab_arrays)
-        ]
+        _marg = [_marginal_efficiency(g, lab) for g, lab in zip(group_arrays, group_lab_arrays)]
+        _marginal_neff = [m[1] for m in _marg]
+        _marginal_rho2 = [m[0] for m in _marg]
         if any(v is None for v in _marginal_neff):
             _marginal_neff = None
+        if any(v is None for v in _marginal_rho2):
+            _marginal_rho2 = None
         _counts = [int(np.count_nonzero(~np.isnan(lab))) for lab in group_lab_arrays]
         _n_lab_per_cond = float(np.mean(_counts)) if _counts else None
 
     def _eff_for(a, b):
         """Pair efficiency, tolerating either key order from judge_alignment."""
         return _pair_eff.get((a, b)) or _pair_eff.get((b, a)) or (None, None)
+
+    def _rank_biserial_for(i, j):
+        """2*theta for this pair, corrected when the metric is judge-corrected.
+
+        Reporting only, like the efficiency numbers above: a failure here must
+        cost a column, not the comparison.
+        """
+        try:
+            from evalstats.tests import _midrank_theta, _p_x_gt_y_midrank, _ppi_two_sample
+            if not ppi_applied:
+                return 2.0 * float(_midrank_theta(group_arrays[i], group_arrays[j]))
+            res = _ppi_two_sample(
+                group_arrays[i], group_arrays[j], group_lab_arrays[i], group_lab_arrays[j],
+                lambda _x, _y: _p_x_gt_y_midrank(_x, _y) - 0.5,
+                alpha, n_boot, rng,
+            )
+            return 2.0 * float(res.estimate)
+        except Exception:
+            return None
 
     pairwise = []
     for idx, (i, j) in enumerate(pw["pairs"]):
@@ -1225,7 +1258,7 @@ def compare_unpaired(
             n_a=int(group_arrays[i].size), n_b=int(group_arrays[j].size),
             mean_test_p=(None if pw["mean_test_p"] is None
                          else float(pw["mean_test_p"][idx])),
-            rho2=_r2, n_eff=_ne,
+            rho2=_r2, n_eff=_ne, rank_biserial=_rank_biserial_for(i, j),
         ))
 
     pareto_dict = None
@@ -1267,6 +1300,6 @@ def compare_unpaired(
         ppi_applied=ppi_applied, alignment_result=alignment_result,
         omnibus_rho2=_om_rho2, omnibus_n_eff=_om_neff,
         n_lab_per_condition=_n_lab_per_cond,
-        marginal_n_eff=_marginal_neff,
+        marginal_n_eff=_marginal_neff, marginal_rho2=_marginal_rho2,
         show_p_values=p_values, pareto=pareto_dict,
     )

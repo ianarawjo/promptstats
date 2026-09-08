@@ -2490,12 +2490,15 @@ def _run_alignment_ppi(
 
     missing_entities = [e for i, e in enumerate(labels) if np.all(np.isnan(lab_matrix[i]))]
     if missing_entities:
-        warnings.warn(
-            f"PPI alignment: the following entities have no human-labeled items and "
-            f"will keep their uncorrected LLM-only estimate: {missing_entities}. "
-            "Consider expanding the alignment set to cover all entities.",
-            UserWarning,
-            stacklevel=4,
+        # Refuse rather than degrade. These entities would keep their raw
+        # judge estimate while everything around them is corrected, printed
+        # under a banner saying every estimate below is corrected -- and a
+        # warning is too easy to miss or suppress to carry that.
+        raise ValueError(
+            f"PPI alignment: {missing_entities} have no human-labeled items, so their "
+            "estimates cannot be corrected. Label a random sample of items for every "
+            "condition before comparing (see `evalstats label`), or drop these "
+            "conditions from the comparison."
         )
 
     # ── Label efficiency for the corrected estimates ──────────────────────
@@ -2518,18 +2521,43 @@ def _run_alignment_ppi(
         _conds = {
             str(lbl): (scores_2d[i], lab_matrix[i]) for i, lbl in enumerate(labels)
         }
-        cr._marginal_n_eff = [
-            _marginal_efficiency(scores_2d[i], lab_matrix[i])[1]
-            for i in range(len(labels))
-        ]
+        _marg = [_marginal_efficiency(scores_2d[i], lab_matrix[i]) for i in range(len(labels))]
+        cr._marginal_rho2 = [m[0] for m in _marg]
+        cr._marginal_n_eff = [m[1] for m in _marg]
         if any(v is None for v in cr._marginal_n_eff):
             cr._marginal_n_eff = None
+        if any(v is None for v in cr._marginal_rho2):
+            cr._marginal_rho2 = None
         _, _ci_pairs = _efficiency_metric(_conds, test="ttest", design="within",
                                           want_pairs=True)
         _, _p_pairs = _efficiency_metric(_conds, test="wilcoxon", design="within",
                                          want_pairs=True)
         cr._pair_ci_eff = _ci_pairs
         cr._pair_p_eff = _p_pairs
+        # Rank-biserial is exactly 2*theta, with theta the Walsh mid-rank
+        # estimand the PPI Wilcoxon already corrects, so the effect size can
+        # be corrected rather than left as the raw-score number
+        # PairedDiffResult.rank_biserial computes from per_input_diffs.
+        # (That property drops zero differences where the Walsh theta keeps
+        # them at half weight, so the two conventions differ on ties; the
+        # mid-rank one is what every other rank statistic here uses.)
+        cr._pair_es = {}
+        try:
+            from evalstats.tests import _ppi_paired_arrays
+            from evalstats.ppi import paired_walsh_midrank_theta
+            for _i, _a in enumerate(labels):
+                for _j, _b in enumerate(labels):
+                    if _j <= _i:
+                        continue
+                    _th = _ppi_paired_arrays(
+                        scores_2d[_i], scores_2d[_j], lab_matrix[_i], lab_matrix[_j],
+                        paired_walsh_midrank_theta, alpha, 2000, np.random.default_rng(0),
+                        rectifier_func=paired_walsh_midrank_theta, power_tune=True,
+                    )
+                    cr._pair_es[(str(_a), str(_b))] = 2.0 * float(_th.estimate)
+        except Exception:
+            cr._pair_es = {}
+
         cr._omnibus_eff = None
         if len(labels) >= 3:
             _om, _ = _efficiency_metric(_conds, test="friedman", design="within",
@@ -2545,7 +2573,8 @@ def _run_alignment_ppi(
         # _print_bundle_summary is handed the bundle, not the ComparisonResult,
         # so mirror the values onto it; cr keeps them for programmatic access.
         for _a in ("_marginal_n_eff", "_pair_ci_eff", "_pair_p_eff",
-                   "_omnibus_eff", "_n_lab_per_entity"):
+                   "_omnibus_eff", "_n_lab_per_entity", "_pair_es",
+                   "_marginal_rho2"):
             setattr(bundle, _a, getattr(cr, _a))
     except Exception:
         # Reporting extra: never allowed to break a correction that worked.
@@ -2869,12 +2898,13 @@ def _run_alignment_ppi(
             stacklevel=4,
         )
     if skipped_pairs:
-        warnings.warn(
-            f"PPI alignment: the following pairs have fewer than 15 labeled items "
-            f"for either entity and keep their uncorrected estimate: {skipped_pairs}. "
-            "Consider expanding the alignment set to cover more entities.",
-            UserWarning,
-            stacklevel=4,
+        # As above: these pairs have too few labels to correct, and printing
+        # them uncorrected beside corrected ones is worse than not printing.
+        raise ValueError(
+            f"PPI alignment: {skipped_pairs} have fewer than 15 items labeled in both "
+            "conditions, so their comparison cannot be corrected. PPI needs at least 15 "
+            "labeled items shared by the two conditions (or 15 in each condition "
+            "separately). Label more items (see `evalstats label`) before comparing."
         )
 
     # Multiple-comparison correction on marginal p-values (unaffected by the

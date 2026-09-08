@@ -1735,7 +1735,8 @@ class TestAnovaOnewayPPIFieldStructure:
 
     def test_warns_when_15_to_29_labels_independent(self):
         rng = np.random.default_rng(524)
-        groups, groups_lab = _multigroup(rng, k=3, n=120, n_lab=6)
+        # 15-29 labels is now a per-group band, not a pooled one.
+        groups, groups_lab = _multigroup(rng, k=3, n=120, n_lab=20)
         with pytest.warns(UserWarning, match="undercover below 30 labels"):
             r = anova_oneway(*groups, groups_lab=groups_lab, n_boot=120, rng=524)
         assert r.corrected_estimate is not None
@@ -2616,7 +2617,8 @@ class TestKruskalPPIFieldStructure:
 
     def test_warns_when_15_to_29_labels(self):
         rng = np.random.default_rng(961)
-        groups, groups_lab = _multigroup(rng, k=3, n=120, n_lab=6)
+        # 15-29 labels is now a per-group band, not a pooled one.
+        groups, groups_lab = _multigroup(rng, k=3, n=120, n_lab=20)
         with pytest.warns(UserWarning, match="undercover below 30 labels"):
             r = kruskalwallis(*groups, groups_lab=groups_lab, n_boot=120, rng=961)
         assert r.corrected_estimate is not None

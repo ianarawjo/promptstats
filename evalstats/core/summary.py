@@ -235,6 +235,8 @@ def print_analysis_summary(
     pareto: Optional[dict] = None,
     rng_seed: Optional[int] = _SEED_UNSET,
     metric: Optional[str] = None,
+    factor_singular: str = "model",
+    factor_plural: str = "models",
 ) -> None:
     """Print a concise console summary of analyze() results.
 
@@ -262,6 +264,8 @@ def print_analysis_summary(
             style=style,
             min_meaningful_diff=min_meaningful_diff,
             show_rank_probabilities=show_rank_probabilities,
+            factor_singular=factor_singular,
+            factor_plural=factor_plural,
         )
         return
 
@@ -295,6 +299,8 @@ def print_analysis_summary(
                 style=style,
                 min_meaningful_diff=min_meaningful_diff,
                 show_rank_probabilities=show_rank_probabilities,
+                factor_singular=factor_singular,
+                factor_plural=factor_plural,
             )
         else:
             _print_bundle_summary(
@@ -653,20 +659,41 @@ def _print_multi_model_summary(
     style: Literal["line", "gradient"] = "gradient",
     min_meaningful_diff: Optional[float] = None,
     show_rank_probabilities: bool = False,
+    factor_singular: str = "model",
+    factor_plural: str = "models",
 ) -> None:
-    _print_loud_section("Multi-Model Analysis Summary")
-    print(f"Shape: {bundle.shape}")
-    print(
-        f"Models: {bundle.benchmark.n_models} | "
-        f"Templates: {bundle.benchmark.n_templates} | "
-        f"Inputs: {bundle.benchmark.n_inputs}"
-        + (f" | Runs: {bundle.benchmark.n_runs}" if bundle.benchmark.n_runs > 1 else "")
-        + _seed_note(rng_seed)
-    )
+    """Print a multi-factor summary.
+
+    ``factor_singular``/``factor_plural`` name the compared axis. The parser
+    carries that axis in its model slot whatever the source column was called,
+    so every label here comes from these rather than the word "model".
+    """
+    _print_loud_section("Analysis Summary")
+    # Same "a × b × c" phrasing the per-section Shape lines use, rather than
+    # the BenchmarkShape repr. Dimensions that are a single implicit level
+    # (one prompt, one run) are left out instead of printed as 1, and the
+    # counts line that used to sit under this one is gone: it restated these
+    # numbers and carried only the seed note, which now rides here.
+    bench, shape = bundle.benchmark, bundle.shape
+    shape_parts = [f"{bench.n_models} {factor_plural}"]
+    if bench.n_templates > 1:
+        shape_parts.append(f"{bench.n_templates} prompts")
+    shape_parts.append(f"{bench.n_inputs} inputs")
+    if shape.n_input_vars > 1:
+        shape_parts.append(f"{shape.n_input_vars} input vars")
+    shape_parts.append(f"{shape.n_evaluators} evaluator{'s' if shape.n_evaluators != 1 else ''}")
+    if bench.n_runs > 1:
+        shape_parts.append(f"{bench.n_runs} runs")
+    print(f"Shape: {' × '.join(shape_parts)}{_seed_note(rng_seed)}")
     model_str = ", ".join(bundle.benchmark.model_labels)
-    print(f"Models: {model_str}")
+    print(f"{factor_plural.capitalize()}: {model_str}")
     best_model, best_template = bundle.best_pair
-    print(f"{_BOLD}Best pair by mean:{_RESET} model='{_BRIGHT_GREEN}{best_model}{_RESET}'  template='{_BRIGHT_GREEN}{best_template}{_RESET}'")
+    if bundle.benchmark.n_templates > 1:
+        print(f"{_BOLD}Best pair by mean:{_RESET} {factor_singular}='{_BRIGHT_GREEN}{best_model}{_RESET}'  template='{_BRIGHT_GREEN}{best_template}{_RESET}'")
+    else:
+        # One implicit template: naming it says nothing, and "pair" is a
+        # misnomer when there is only one axis.
+        print(f"{_BOLD}Best by mean:{_RESET} {factor_singular}='{_BRIGHT_GREEN}{best_model}{_RESET}'")
     print()
 
     # MultiModelBenchmark requires >= 2 models, so this section (comparing
@@ -675,13 +702,21 @@ def _print_multi_model_summary(
     # template is common (e.g. a plain model-only comparison) -- so it, and
     # the equally-degenerate per-model breakdown loop further down, are
     # skipped when there's nothing to compare there.
-    _print_loud_section("Model-level comparison (across all prompts):")
+    # Named for the axis being compared rather than "model-level", and the
+    # marginalization is only worth stating when there is more than one
+    # template to marginalize over.
+    factor_label = factor_singular
+    across = (
+        f" ({bundle.benchmark.n_templates} prompts pooled)"
+        if bundle.benchmark.n_templates > 1 else ""
+    )
+    _print_loud_section(f"Comparison across '{factor_label}'{across}")
     _print_bundle_summary(
         bundle.model_level,
         top_pairwise=top_pairwise,
         line_width=line_width,
-        item_singular="model",
-        item_plural="models",
+        item_singular=factor_label,
+        item_plural=f"{factor_label}s",
         pairwise_sort=pairwise_sort,
         style=style,
         min_meaningful_diff=min_meaningful_diff,
@@ -690,7 +725,7 @@ def _print_multi_model_summary(
     print()
 
     if bundle.benchmark.n_templates > 1:
-        _print_loud_section("Cross-model per-template comparison (models collapsed):")
+        _print_loud_section(f"Cross-{factor_singular} per-template comparison ({factor_plural} collapsed):")
         _print_bundle_summary(
             bundle.template_level,
             top_pairwise=top_pairwise,
@@ -710,7 +745,7 @@ def _print_multi_model_summary(
         _print_cross_model_seed_instability(bundle, rows=instability_rows)
         most_stable_model, instability, *_ = instability_rows[0]
         print(
-            f"  {_BOLD}{_BRIGHT_GREEN}-> Most stable model across runs:{_RESET} "
+            f"  {_BOLD}{_BRIGHT_GREEN}-> Most stable {factor_singular} across runs:{_RESET} "
             f"'{most_stable_model}' "
             f"(instability={instability:.4f}, {_instability_label(instability)})"
         )
@@ -718,7 +753,7 @@ def _print_multi_model_summary(
     if bundle.benchmark.n_templates > 1:
         for model_label, model_bundle in bundle.per_model.items():
             print()
-            _print_loud_section(f"Per-Model Summary: {model_label}")
+            _print_loud_section(f"Per-{factor_singular.capitalize()} Summary: {model_label}")
             _print_bundle_summary(
                 model_bundle,
                 top_pairwise=top_pairwise,
@@ -736,7 +771,7 @@ def _print_multi_model_summary(
         # model-level tables above with "/ default_prompt" appended. The
         # per-template section above is already gated the same way.
         return
-    _print_loud_section("Cross-Model Ranking (all model/template pairs)")
+    _print_loud_section(f"Cross-{factor_singular.capitalize()} Ranking (all {factor_singular}/template pairs)")
     _print_model_template_matrix(bundle)
 
     # The unconditional "Mean Performance" listing orders by mean, so it
@@ -758,7 +793,7 @@ def _print_multi_model_summary(
         pbest_indices = np.argsort(-p_best)
         _print_subsection(f"--- Rank Probabilities: All {n_show} by P(Best) ({_rank_method_label(bundle.cross_model)}) ---")
         print(
-            f"  {'Model':<{model_col_width}s} "
+            f"  {factor_singular.capitalize():<{model_col_width}s} "
             f"{'Template':<{template_col_width}s} "
             f"{'P(Best)':>9s} {'':<{rank_bar_width}s} "
             f"{'E[Rank]':>9s} {'':<{rank_bar_width}s}"
@@ -815,7 +850,7 @@ def _print_multi_model_summary(
         f"(· ±1σ, {_ci_legend_mm}{_mean_marker_mm}, │ {ref_label_str})"
     )
     print(
-        f"  {'Model':<{model_col_width}s} "
+        f"  {factor_singular.capitalize():<{model_col_width}s} "
         f"{'Template':<{template_col_width}s} "
         f"{'Interval Plot':<{line_width}s} "
         f"{stat_label:>8s} {'CI Low':>9s} {'CI High':>9s}"
@@ -1250,6 +1285,15 @@ def _prepare_paired_pairwise_rows(
             right_pos = pos_b
             swapped_multi_ci = result.multi_ci
 
+        # PairedDiffResult.rank_biserial is computed from the raw judge
+        # differences. When PPI is applied, prefer the corrected 2*theta
+        # attached in api.py so the effect size does not sit uncorrected
+        # beside a corrected mean, CI and p-value.
+        _es_map = getattr(bundle, "_pair_es", None) or {}
+        _es_ppi = _es_map.get((str(a), str(b)))
+        if _es_ppi is not None:
+            rank_biserial = -float(_es_ppi) if left_item == b else float(_es_ppi)
+
         if eff_p_source in {"max_t", "boot"}:
             display_p = result.p_value
         elif eff_p_source == "wsr":
@@ -1444,8 +1488,8 @@ def _prepare_unpaired_pairwise_rows(
 
     # There is no secondary Δmean column: it existed only to put the old
     # dominance estimand back on the metric's own scale, and the primary
-    # column now *is* that mean difference. (The shared renderer's "ES" slot
-    # is left empty here; the paired path still uses it for rank-biserial.)
+    # column now *is* that mean difference. The renderer's "ES" slot carries
+    # the independent-samples rank-biserial, the paired path's counterpart.
 
     # Explicit pairwise test name -- previously the column header was just
     # "p" with no indication of which test produced it, PPI-corrected or
@@ -1484,6 +1528,7 @@ def _prepare_unpaired_pairwise_rows(
             "multi_ci": None,
             "rho2": p.rho2,
             "n_eff": p.n_eff,
+            "es_value": p.rank_biserial,
         }
         rows.append(row)
 
@@ -1560,7 +1605,10 @@ def _prepare_unpaired_pairwise_rows(
         "effect_label": "Left - Right",
         # No secondary raw-mean-difference column: every family's primary
         # column already *is* that difference, so a copy would be redundant.
-        "es_label": None,
+        # Independent-samples rank-biserial (2*theta), in the same column slot
+        # and on the same scale as the paired path's, and PPI-corrected with
+        # the comparison rather than computed from raw judge scores.
+        "es_label": "ES" if any(r["es_value"] is not None for r in rows) else None,
         "p_col_header": p_col_header,
         "footer_fn": _footer,
     }
@@ -1829,6 +1877,7 @@ def _print_mean_advantage(
     template_col_width: int = 24,
     style: Literal["line", "gradient"] = "gradient",
     n_eff_per_entity: Optional[list] = None,
+    rho2_per_entity: Optional[list] = None,
 ) -> None:
     """Print the absolute performance interval-plot table for a set of entities.
 
@@ -1888,9 +1937,15 @@ def _print_mean_advantage(
         and len(n_eff_per_entity) == len(labels)
         and all(v is not None for v in n_eff_per_entity)
     )
+    _show_rho2 = (
+        rho2_per_entity is not None
+        and len(rho2_per_entity) == len(labels)
+        and all(v is not None for v in rho2_per_entity)
+    )
     print(
         f"  {item_singular_title:<{template_col_width}s} {'Interval Plot':<{line_width}s} {stat_label:>8s} "
         f"{'CI Low':>9s} {'CI High':>9s}"
+        + (f" {'rho^2':>7s}" if _show_rho2 else "")
         + (f" {'N_eff':>7s}" if _show_neff else "")
     )
     for i, label in enumerate(labels):
@@ -1914,6 +1969,7 @@ def _print_mean_advantage(
             f"{float(mean[i]):>7.3f} "
             f"{float(ci_low[i]):>8.3f} "
             f"{float(ci_high[i]):>8.3f}"
+            + (f" {float(rho2_per_entity[i]):>7.2f}" if _show_rho2 else "")
             + (f" {float(n_eff_per_entity[i]):>7.0f}" if _show_neff else "")
         )
 
@@ -1922,7 +1978,7 @@ def _print_mean_advantage(
     # run (here Logit-t against Paired NIG).
     _marginal_method = _pretty_marginal_ci_method(resolved_ci_method)
     if _marginal_method:
-        print(f"{_DIM}  marginal CI method: {_marginal_method}{_RESET}")
+        print(f"{_DIM}  CI method: {_marginal_method}{_RESET}")
 
 
 def _pretty_marginal_ci_method(code: Optional[str]) -> Optional[str]:
@@ -2037,9 +2093,11 @@ def _print_omnibus_section(
                 line += f", {n_eff / n_lab_per_entity:.1f}x the {n_lab_per_entity:.0f} you labeled"
             print(line)
         p_str = _format_p_value(p_value)
-        print(f"  uncorrected: statistic = {statistic:.4f}{df_note}, p = {p_str}")
-        print(f"      ^ do not report this one. It treats the judge's scores as "
-              f"if they were human labels.")
+        # Dimmed: it is shown for contrast with the corrected p above it, and
+        # should not read as one of the reported results.
+        print(f"{_DIM}  uncorrected: statistic = {statistic:.4f}{df_note}, p = {p_str}{_RESET}")
+        print(f"{_DIM}      ^ do not report this one. It treats the judge's scores as "
+              f"if they were human labels.{_RESET}")
     else:
         p_str = _format_p_value(display_p)
         print(f"  statistic = {statistic:.4f}{df_note}   p = {p_color}{p_str}{_RESET}")
@@ -2107,14 +2165,23 @@ def _print_bundle_summary(
     )
     print()
 
-    if getattr(bundle, "ppi_applied", False):
+    _ppi_on = getattr(bundle, "ppi_applied", False)
+    if _ppi_on:
         _print_ppi_banner()
 
-    _print_subsection("--- Descriptive Statistics ---")
-    _rob_df = bundle.robustness.summary_table()
-    _rob_df.index.name = item_singular
-    print(_rob_df.to_string())
-    print()
+    # Only the mean of this table is PPI-corrected; median, std, cv, iqr,
+    # cvar_10 and the percentiles describe the raw judge scores, and cv is
+    # std over the RAW mean so it contradicts the corrected mean beside it.
+    # Correcting them needs a PPI quantile estimator this package does not
+    # have, and printing them under the "every estimate below is corrected"
+    # banner invites them to be read as corrected. The surviving mean is
+    # already in Mean Performance below, with a CI and N_eff.
+    if not _ppi_on:
+        _print_subsection("--- Descriptive Statistics ---")
+        _rob_df = bundle.robustness.summary_table()
+        _rob_df.index.name = item_singular
+        print(_rob_df.to_string())
+        print()
 
     if show_rank_probabilities:
         _print_subsection(f"--- Rank Probabilities ({_rank_method_label(bundle)}) ---")
@@ -2158,6 +2225,7 @@ def _print_bundle_summary(
         template_col_width=template_col_width,
         style=style,
         n_eff_per_entity=getattr(bundle, "_marginal_n_eff", None),
+        rho2_per_entity=getattr(bundle, "_marginal_rho2", None),
     )
     print()
 
@@ -2223,7 +2291,12 @@ def _print_bundle_summary(
     if pareto is not None:
         _print_pareto_callout(pareto, metric=metric)
 
-    if guidance:
+    # Not on the PPI path. The block's sample-size projection is a heuristic
+    # that was never validated against a corrected comparison -- and it is
+    # degenerate whenever its CI-width branch dominates, returning N*6.25
+    # regardless of the interval, so it does not respond to the correction it
+    # would appear to describe. The uncorrected paths keep it unchanged.
+    if guidance and not _ppi_on:
         _print_next_steps_guidance(
             bundle,
             item_plural=item_plural,
@@ -4107,10 +4180,11 @@ def print_group_comparison_summary(result: "GroupComparisonResult", *, style: st
     # built from each group's raw per-group scores -- mean/std come from
     # GroupStat (PPI-corrected when alignment= was passed, exactly like the
     # paired path's own mean/CI), the rest (median/cv/iqr/cvar_10/
-    # percentiles) from the raw, uncorrected scores, also matching the
-    # paired path (only mean/ci_low/ci_high/multi_ci get PPI-overridden
-    # there too -- see api.py's PPI-correction block).
-    if all(g.descriptive is not None for g in result.groups):
+    # percentiles) from the raw, uncorrected scores, which is why the whole
+    # table is skipped once PPI is applied -- the paired path drops it for
+    # the same reason. Only mean/ci_low/ci_high/multi_ci get PPI-overridden
+    # (see api.py's PPI-correction block).
+    if all(g.descriptive is not None for g in result.groups) and not result.ppi_applied:
         from evalstats.core.variance import RobustnessResult
         _desc = RobustnessResult(
             labels=[g.label for g in result.groups],
@@ -4148,6 +4222,7 @@ def print_group_comparison_summary(result: "GroupComparisonResult", *, style: st
         template_col_width=label_width,
         style=style,
         n_eff_per_entity=result.marginal_n_eff,
+        rho2_per_entity=getattr(result, "marginal_rho2", None),
     )
     print()
 
