@@ -90,6 +90,10 @@ BASE_CI = ["Method", "Cov", "MinCov", "Width", "Pen", "Score", "Type-I", "Power"
 # even while covering worst. MinCov is the worst single (scenario, n) cell and
 # Penalty is the score's miss term; both surface that tail. Drop either here
 # if the compressed tables need the horizontal space back.
+# ci_single has no Type-I / Power: those are pairwise-test quantities, and the
+# mean-point-estimate case never computes them. Without this the ci_single
+# tables cannot be rebuilt at all, which is why they still lack MinCov and Pen.
+BASE_CI_SINGLE = ["Method", "Cov", "MinCov", "Width", "Pen", "Score", "Time (ms)"]
 BASE_PV = ["Method", "Type-I error", "Mean power"]
 REAL_PV = ["Type-I error", "Mean power"]
 NS_PAIRWISE = ["20", "30", "50", "75", "100"]
@@ -106,8 +110,12 @@ REAL_NS_PAIRWISE = ["20", "50", "100"]
 # actually reach for) and smooth_bootstrap (the conservative alternative
 # the recommendations name). Nested/dithered families likewise keep one.
 # A row carrying \textbf or \underline is never dropped.
+# bca, bayes_bootstrap and bootstrap_t are deliberately NOT culled: the paper
+# makes claims about bootstrap calibration, so the rows those claims rest on
+# have to be visible in the appendix rather than only in the supplement. The
+# MinCov column is where they fail hardest (~.16 on binary against Wilson's
+# .908), which is invisible if the rows are dropped.
 DROP_FAMILY = {
-    "bca", "bayes_bootstrap", "bootstrap_t",
     "bca_nested", "bayes_bootstrap_nested", "bootstrap_t_nested",
     "smooth_bootstrap_nested",
     "bayes_diff_nested", "smooth_diff_nested",
@@ -234,10 +242,12 @@ small $n$, and Wald is far too wide.""",
 
 TABLES = [
     dict(key="ci_single", synth="tab:ci_single:sim", real="tab:ci_single:real",
-         ns=NS_SINGLE, real_ns=REAL_NS_SINGLE, keep=None),
+         ns=NS_SINGLE, real_ns=REAL_NS_SINGLE, keep=None,
+         base_cols=BASE_CI_SINGLE),
     dict(key="ci_multirun", synth="tab:ci_single:multirun",
          real="tab:ci_single:multirun:real", ns=NS_MULTI,
-         real_ns=REAL_NS_MULTI, keep=None),
+         real_ns=REAL_NS_MULTI, keep=None,
+         base_cols=BASE_CI_SINGLE),
     dict(key="ci_paired_single", synth="tab:ci_paired:single:synth",
          real="tab:ci_paired:single:real", ns=NS_SINGLE,
          real_ns=REAL_NS_SINGLE, keep=None),

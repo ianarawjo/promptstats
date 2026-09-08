@@ -60,3 +60,6 @@ simulations/kw_rowsum/
 # data in supplementary/data/ellipse/ is CC BY-NC-SA 4.0 and should be
 # redistributed only with the supplement.
 supplementary/
+
+# Builds the anonymized supplement into dist/. Not part of the package.
+build_supplement.py
