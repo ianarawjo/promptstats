@@ -1102,13 +1102,11 @@ def compare(
         attributes. ``score_range=`` is honored (passed through to the
         per-group marginal CI's auto-method resolution, same as the paired
         path). ``n_mc=`` has no effect — the equivalent knob is
-        ``n_bootstrap=``. ``p_values=`` and ``omnibus=`` are honored, but
-        with unpaired-specific *defaults of True* (not ``compare()``'s own
-        ``False``) — leave them unset to get this path's normal, always-
-        shown report; pass ``p_values=False`` to hide the pairwise table's
-        p-value column (the underlying values stay in ``.to_dict()``/
-        ``.to_frame()``), or ``omnibus=False`` to skip running the omnibus
-        test entirely at 3+ groups. ``baseline=``, ``pairwise_test=``, and
+        ``n_bootstrap=``. ``p_values=`` and ``omnibus=`` are honored, with
+        the same default (``False``) as the paired path — pass
+        ``p_values=True`` to show the pairwise table's p-value column, or
+        ``omnibus=True`` to run and print the omnibus test at 3+ groups.
+        ``baseline=``, ``pairwise_test=``, and
         ``show_rank_probabilities=`` still have no effect on this path —
         it always reports all-pairs comparisons (no baseline-relative
         view) and has no rank-probability view.
@@ -1385,14 +1383,11 @@ def compare(
                     "still honored."
                 )
             if design == "unpaired":
-                # Unlike the paired path, this narrower report defaults both
-                # to True (an unpaired-specific default, not compare()'s own
-                # False) -- unset (None, meaning the caller didn't pass
-                # either) preserves the always-shown behavior this path was
-                # built and battle-tested with; an explicit True/False is
-                # honored as a real suppress/show toggle.
-                _up_p_values = True if engine_kwargs.get("p_values") is None else bool(engine_kwargs.get("p_values"))
-                _up_omnibus = True if engine_kwargs.get("omnibus") is None else bool(engine_kwargs.get("omnibus"))
+                # Same default as the paired path: unset (None, meaning the
+                # caller didn't pass either) resolves to False. An explicit
+                # True/False is honored as a real suppress/show toggle.
+                _up_p_values = False if engine_kwargs.get("p_values") is None else bool(engine_kwargs.get("p_values"))
+                _up_omnibus = False if engine_kwargs.get("omnibus") is None else bool(engine_kwargs.get("omnibus"))
                 return compare_unpaired(
                     df, factor_col=_design_factor_col, metric_col=metric_col,
                     item_col=item_col, alignment=alignment, alpha=alpha,
@@ -2928,13 +2923,17 @@ def _run_alignment_ppi(
     # bundle.pairwise.friedman is built from the raw, uncorrected LLM scores;
     # without this it would silently stay frozen (same χ²/p) even though the
     # means/CIs/pairwise p-values above just changed under the correction.
+    # p_value itself is left as the uncorrected number (mirrors the unpaired
+    # path's omnibus_p_value/omnibus_corrected_p_value split) so both can be
+    # displayed side by side rather than the corrected value clobbering the
+    # only copy of the uncorrected one.
     if bundle.pairwise.friedman is not None and n_entities >= 3:
         from evalstats.tests import _ppi_friedman_p_value
         groups = [scores_2d[i] for i in range(n_entities)]
         groups_lab = [lab_matrix[i] for i in range(n_entities)]
         corrected_friedman_p = _ppi_friedman_p_value(groups, groups_lab, n_entities)
         if corrected_friedman_p is not None:
-            bundle.pairwise.friedman.p_value = float(corrected_friedman_p)
+            bundle.pairwise.friedman.corrected_p_value = float(corrected_friedman_p)
 
     # Update bundle method metadata so summary() headers reflect the PPI method.
     bundle.resolved_method = pairwise_method

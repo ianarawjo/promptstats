@@ -1303,31 +1303,6 @@ def _prepare_paired_pairwise_rows(
                 ),
             )
 
-    def _friedman_line() -> None:
-        if bundle.pairwise.friedman is None:
-            return
-        fr = bundle.pairwise.friedman
-        fr_p_str = _format_p_value(fr.p_value)
-        fr_p_color = _BRIGHT_GREEN if fr.p_value <= 0.05 else _YELLOW
-        ppi_applied = getattr(bundle, "ppi_applied", False)
-        omnibus_label = "PPI-Friedman omnibus" if ppi_applied else "Friedman omnibus"
-        stat_note = " (uncorrected LLM-only statistic)" if ppi_applied else ""
-        p_note = " (PPI-corrected)" if ppi_applied else ""
-        print(
-            f"  {omnibus_label}: χ²({fr.df}) = {fr.statistic:.3f}{stat_note}, "
-            f"p = {fr_p_color}{fr_p_str}{_RESET}{p_note}"
-        )
-        _om_eff = getattr(bundle, "_omnibus_eff", None)
-        if ppi_applied and _om_eff:
-            _n_lab = getattr(bundle, "_n_lab_per_entity", None)
-            print(f"  effective judge-human alignment  rho^2 = {_om_eff[0]:.2f}")
-            _l = f"  N_eff (effective sample size) = {_om_eff[1]:.0f} labels"
-            if _n_lab:
-                _l += f", {_om_eff[1] / _n_lab:.1f}x the {_n_lab:.0f} you labeled"
-            print(_l)
-        if fr.p_value > 0.05:
-            print(f"  {_YELLOW}[!] {omnibus_label} p > 0.05: no significant omnibus effect — treat pairwise results with caution.{_RESET}")
-
     def _footer(_rows: list[dict], _max_pairs: int) -> None:
         print(f"{_DIM}  ES = Effect Size (r_rb) = rank biserial correlation (small≈0.1, medium≈0.3, large≈0.5){_RESET}")
 
@@ -1414,7 +1389,6 @@ def _prepare_paired_pairwise_rows(
         "effect_label": "Left - Right",
         "es_label": "ES",
         "p_col_header": p_col_header,
-        "friedman_line_fn": _friedman_line,
         "footer_fn": _footer,
     }
     return rows, meta
@@ -1582,7 +1556,6 @@ def _prepare_unpaired_pairwise_rows(
         # column already *is* that difference, so a copy would be redundant.
         "es_label": None,
         "p_col_header": p_col_header,
-        "friedman_line_fn": None,
         "footer_fn": _footer,
     }
     return rows, meta
@@ -1647,9 +1620,6 @@ def _print_pairwise_section(
         max_pairs = len(rows)
     else:
         max_pairs = max(0, min(top_pairwise, len(rows)))
-
-    if max_pairs > 0 and meta["friedman_line_fn"] is not None:
-        meta["friedman_line_fn"]()
 
     pair_item_col_width = meta["pair_item_col_width"]
     pair_stat_label = meta["pair_stat_label"]
@@ -1975,6 +1945,62 @@ def _print_ppi_banner() -> None:
     print()
 
 
+def _print_omnibus_section(
+    *,
+    label: str,
+    statistic: float,
+    p_value: float,
+    df: Optional[int] = None,
+    corrected_p_value: Optional[float] = None,
+    ppi_applied: bool = False,
+    rho2_eff: Optional[float] = None,
+    n_eff: Optional[float] = None,
+    n_lab_per_entity: Optional[float] = None,
+) -> None:
+    """Print the boxed omnibus-test section, shared by the paired path's
+    Friedman test and the unpaired path's Kruskal-Wallis / one-way ANOVA
+    test -- its own subsection, ahead of the pairwise comparisons table.
+
+    Originally two independently-drifting implementations (an inline line
+    tucked inside the paired path's pairwise section vs. this boxed,
+    multi-line form on the unpaired path); unified onto the unpaired path's
+    presentation -- its own section, PPI-corrected p first, uncorrected
+    stated explicitly with an anti-misuse warning -- since that is the
+    clearer report of the two once a reader has to choose.
+
+    ``df`` is Friedman-only (Kruskal-Wallis/ANOVA's ``TestResult`` doesn't
+    carry one) and is omitted from the statistic line when ``None``.
+    """
+    ppi_prefix = "PPI-" if ppi_applied else ""
+    _print_subsection(f"--- Omnibus Test: {ppi_prefix}{label} ---")
+    df_note = f"({df})" if df is not None else ""
+    display_p = corrected_p_value if (ppi_applied and corrected_p_value is not None) else p_value
+    p_color = _BRIGHT_GREEN if display_p <= 0.05 else _YELLOW
+    if ppi_applied:
+        if corrected_p_value is not None:
+            cp_str = _format_p_value(corrected_p_value)
+            print(f"  PPI-corrected p = {p_color}{cp_str}{_RESET}")
+        if rho2_eff is not None and n_eff is not None:
+            print(f"  effective judge-human alignment  rho^2 = {rho2_eff:.2f}")
+            line = f"  N_eff (effective sample size) = {n_eff:.0f} labels/condition"
+            if n_lab_per_entity:
+                line += f", {n_eff / n_lab_per_entity:.1f}x the {n_lab_per_entity:.0f} you labeled"
+            print(line)
+        p_str = _format_p_value(p_value)
+        print(f"  uncorrected: statistic = {statistic:.4f}{df_note}, p = {p_str}")
+        print(f"      ^ do not report this one. It treats the judge's scores as "
+              f"if they were human labels.")
+    else:
+        p_str = _format_p_value(display_p)
+        print(f"  statistic = {statistic:.4f}{df_note}   p = {p_color}{p_str}{_RESET}")
+    if display_p > 0.05:
+        print(
+            f"  {_YELLOW}[!] {ppi_prefix}{label} p > 0.05: no significant omnibus "
+            f"effect — treat pairwise results with caution.{_RESET}"
+        )
+    print()
+
+
 def _print_bundle_summary(
     bundle: AnalysisBundle,
     *,
@@ -2063,6 +2089,21 @@ def _print_bundle_summary(
         n_eff_per_entity=getattr(bundle, "_marginal_n_eff", None),
     )
     print()
+
+    if bundle.pairwise.friedman is not None:
+        fr = bundle.pairwise.friedman
+        _om_eff = getattr(bundle, "_omnibus_eff", None)
+        _print_omnibus_section(
+            label="Friedman",
+            statistic=fr.statistic,
+            df=fr.df,
+            p_value=fr.p_value,
+            corrected_p_value=fr.corrected_p_value,
+            ppi_applied=getattr(bundle, "ppi_applied", False),
+            rho2_eff=_om_eff[0] if _om_eff else None,
+            n_eff=_om_eff[1] if _om_eff else None,
+            n_lab_per_entity=getattr(bundle, "_n_lab_per_entity", None),
+        )
 
     _print_pairwise_section(
         bundle,
@@ -3420,6 +3461,19 @@ def _pareto_status_phrase(status: "ParetoStatus", *, verbose: bool = True) -> st
     return f"{glyph} {text}"
 
 
+_PARETO_MARKERS = "123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+
+def _pareto_marker(i: int) -> str:
+    """The scatterplot's per-entity marker character for position ``i`` in
+    ``_pareto_sorted_labels`` order (1, 2, ..., 9, A, B, ..., then '#' past
+    36 entities). Shared with :func:`_print_pareto_section`'s table so its
+    new leading "#" column reproduces the exact same character the plot
+    used for that row -- both iterate ``sorted_labels`` in the same order.
+    """
+    return _PARETO_MARKERS[i] if i < len(_PARETO_MARKERS) else "#"
+
+
 def _print_pareto_scatter(
     pareto: dict,
     *,
@@ -3457,10 +3511,7 @@ def _print_pareto_scatter(
     x_lo, x_hi = x_min - x_pad, x_max + x_pad
     y_lo, y_hi = y_min - y_pad, y_max + y_pad
 
-    markers = "123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-
-    def _marker(i: int) -> str:
-        return markers[i] if i < len(markers) else "#"
+    _marker = _pareto_marker
 
     grid = [[" "] * width for _ in range(height)]
     occupied: dict[tuple[int, int], list[int]] = {}
@@ -3598,6 +3649,15 @@ def _print_pareto_section(
     ci_w = 17
 
     have_stats = primary_rob is not None and secondary_rob is not None
+    # The scatterplot above numbers entities 1, 2, 3, ... (see
+    # _print_pareto_scatter/_pareto_marker) only when it actually rendered
+    # (have_stats and >= 2 entities); this leading "#" column reproduces
+    # that same numbering here so a reader can jump from a point on the
+    # plot straight to its row, instead of re-deriving the mapping from the
+    # legend line by line.
+    show_markers = have_stats and len(result.labels) >= 2
+    marker_w = 1
+    marker_prefix = f"{'#':<{marker_w}}  " if show_markers else ""
     if have_stats:
         prim_idx = {lbl: i for i, lbl in enumerate(primary_rob.labels)}
         sec_idx = {lbl: i for i, lbl in enumerate(secondary_rob.labels)}
@@ -3606,22 +3666,23 @@ def _print_pareto_section(
         # Mean column, rather than visually drifting toward the wider CI
         # sub-column when centered over the combined width.
         metric_row = (
-            f"  {'':<{label_w}}  {'':<{status_w}}  "
+            f"  {'':<{len(marker_prefix)}}{'':<{label_w}}  {'':<{status_w}}  "
             f"{_truncate_label(metric_label, mean_w + ci_w + 1):<{mean_w + ci_w + 1}s}  "
             f"{_truncate_label(secondary_col, mean_w + ci_w + 1):<{mean_w + ci_w + 1}s}"
         )
         print(metric_row)
         header = (
-            f"  {'Entity':<{label_w}}  {'Status':<{status_w}}  "
+            f"  {marker_prefix}{'Entity':<{label_w}}  {'Status':<{status_w}}  "
             f"{'Mean':>{mean_w}s} {'95% CI':<{ci_w}s}  "
             f"{'Mean':>{mean_w}s} {'95% CI':<{ci_w}s}"
         )
     else:
-        header = f"  {'Entity':<{label_w}}  {'Status':<{status_w}}"
+        header = f"  {marker_prefix}{'Entity':<{label_w}}  {'Status':<{status_w}}"
     print(header)
     print("  " + "-" * (len(header) - 2))
 
-    for label in sorted_labels:
+    for i, label in enumerate(sorted_labels):
+        row_marker = f"{_pareto_marker(i):<{marker_w}}  " if show_markers else ""
         status_disp = f"{phrases[label]:<{status_w}}"
         color = _pareto_status_color(statuses[label].status)
         status_str = f"{color}{status_disp}{_RESET}" if color else status_disp
@@ -3638,12 +3699,12 @@ def _print_pareto_section(
                 if secondary_rob.ci_low is not None else "--"
             )
             print(
-                f"  {_truncate_label(label, label_w):<{label_w}}  {status_str}  "
+                f"  {row_marker}{_truncate_label(label, label_w):<{label_w}}  {status_str}  "
                 f"{p_mean:>{mean_w}.3g} {p_ci:<{ci_w}s}  "
                 f"{s_mean:>{mean_w}.3g} {s_ci:<{ci_w}s}"
             )
         else:
-            print(f"  {_truncate_label(label, label_w):<{label_w}}  {status_str}")
+            print(f"  {row_marker}{_truncate_label(label, label_w):<{label_w}}  {status_str}")
     print("  " + "-" * (len(header) - 2))
     if show_rank_probabilities:
         print()
@@ -3908,32 +3969,17 @@ def _print_pairwise_efficiency_note(rows: list[dict], result: "GroupComparisonRe
         print(f"{_DIM}  and should not be reused to plan a future study.{_RESET}")
 
 
-def _print_label_efficiency_lines(result: "GroupComparisonResult") -> None:
-    """The two omnibus label-efficiency lines, when the numbers are available.
-
-    Silent when they are not: they come from a best-effort extra call in
-    compare_unpaired, and a missing number should cost the reader two lines,
-    not an error.
-    """
-    if result.omnibus_rho2 is None or result.omnibus_n_eff is None:
-        return
-    print(f"  effective judge-human alignment  rho^2 = {result.omnibus_rho2:.2f}")
-    line = f"  N_eff (effective sample size) = {result.omnibus_n_eff:.0f} labels/condition"
-    n_lab = result.n_lab_per_condition
-    if n_lab:
-        line += f", {result.omnibus_n_eff / n_lab:.1f}x the {n_lab:.0f} you labeled"
-    print(line)
-
-
 def print_group_comparison_summary(result: "GroupComparisonResult", *, style: str = "gradient", verbose: bool = False) -> None:
     """Print the console summary for a between-subjects
     ``compare(design="unpaired")`` result.
 
     Deliberately narrower than the paired path's summary (no forest-plot
-    brackets) but otherwise mirrors it section for section: per-group means
-    with gradient CIs, a pairwise comparison table (with critical-difference
-    rank bands), the omnibus test at k>=3, a Pareto-front section when
-    ``secondary_metric=`` was passed, and an executive summary leaderboard.
+    brackets) but otherwise mirrors it section for section: descriptive
+    statistics, per-group means with gradient CIs, a pairwise comparison
+    table (with critical-difference rank bands), the omnibus test at k>=3
+    (when ``omnibus=True``, same opt-in default as the paired path's own
+    Friedman test), a Pareto-front section when ``secondary_metric=`` was
+    passed, and an executive summary leaderboard.
 
     Reuses the paired path's rendering functions directly rather than
     reimplementing them -- the PPI banner (``_print_ppi_banner``), the
@@ -3961,20 +4007,59 @@ def print_group_comparison_summary(result: "GroupComparisonResult", *, style: st
     _VERBOSE_SUMMARY = bool(verbose)
     from evalstats.core.unpaired import _GroupComparisonResultAsBundle
 
-    print(f"{_BOLD}Between-subjects comparison{_RESET}  "
-          f"(design=unpaired; factor={result.factor_col!r}, metric={result.metric_col!r})")
-    item_note = " (synthetic -- no item column found; each row is its own item)" if result.item_col_synthetic else ""
-    print(f"Item column: {result.item_col!r}{item_note}")
-    # Seed on the existing metadata line rather than its own: it matters for
-    # reproducing a number, but it is not a finding.
-    _seed = getattr(result, "rng_seed", None)
-    seed_note = f"  |  seed: {_seed}" if _seed is not None else "  |  seed: none (varies per call)"
-    print(f"Groups: {len(result.groups)}  |  Score type: {result.score_type}  |  "
-          f"Family: {_FAMILY_DISPLAY_UNPAIRED[result.family]}{seed_note}")
+    # Plain two-line header, mirroring the paired path's own "Shape: ...(...)"
+    # + "{Entities}: N | {Items}: M | seed: X" format (see _print_bundle_summary)
+    # instead of this path's original bold banner + separate "Item column"
+    # line. Score type / family aren't restated here, same as the paired
+    # header never restates its CI/test method -- both surface later, in the
+    # pairwise section's own method labels (e.g. "p (PPI-MWU)").
+    print(
+        f"Shape: BetweenGroups(factor={result.factor_col!r}, "
+        f"groups={len(result.groups)}, metric={result.metric_col!r})"
+    )
+    group_ns = sorted({g.n for g in result.groups})
+    n_note = f"{group_ns[0]}/group" if len(group_ns) == 1 else f"{group_ns[0]}-{group_ns[-1]}/group"
+    n_total = sum(g.n for g in result.groups)
+    print(
+        f"Groups: {len(result.groups)} | N: {n_total} ({n_note})"
+        f"{_seed_note(getattr(result, 'rng_seed', None))}"
+    )
+    if result.item_col_synthetic:
+        print("(no item column found -- each row treated as its own item)")
     print()
 
     if result.ppi_applied:
         _print_ppi_banner()
+
+    # ── Descriptive statistics ──────────────────────────────────────────────
+    # Same table the paired path prints (RobustnessResult.summary_table()),
+    # built from each group's raw per-group scores -- mean/std come from
+    # GroupStat (PPI-corrected when alignment= was passed, exactly like the
+    # paired path's own mean/CI), the rest (median/cv/iqr/cvar_10/
+    # percentiles) from the raw, uncorrected scores, also matching the
+    # paired path (only mean/ci_low/ci_high/multi_ci get PPI-overridden
+    # there too -- see api.py's PPI-correction block).
+    if all(g.descriptive is not None for g in result.groups):
+        from evalstats.core.variance import RobustnessResult
+        _desc = RobustnessResult(
+            labels=[g.label for g in result.groups],
+            mean=np.array([g.mean for g in result.groups]),
+            median=np.array([g.descriptive["median"] for g in result.groups]),
+            std=np.array([g.std for g in result.groups]),
+            cv=np.array([g.descriptive["cv"] for g in result.groups]),
+            iqr=np.array([g.descriptive["iqr"] for g in result.groups]),
+            cvar_10=np.array([g.descriptive["cvar_10"] for g in result.groups]),
+            percentiles={
+                p: np.array([g.descriptive[f"p{p}"] for g in result.groups])
+                for p in (10, 25, 50, 75, 90)
+            },
+            failure_rate=None, failure_threshold=None,
+        )
+        _print_subsection("--- Descriptive Statistics ---")
+        _desc_df = _desc.summary_table()
+        _desc_df.index.name = "group"
+        print(_desc_df.to_string())
+        print()
 
     # ── Per-group means ──────────────────────────────────────────────────────
     label_width = min(24, max(8, max(len(g.label) for g in result.groups)))
@@ -3997,24 +4082,16 @@ def print_group_comparison_summary(result: "GroupComparisonResult", *, style: st
 
     # ── Omnibus test ─────────────────────────────────────────────────────────
     if result.omnibus_test_name is not None:
-        omnibus_name = f"PPI-{result.omnibus_test_name}" if result.ppi_applied else result.omnibus_test_name
-        _print_subsection(f"--- Omnibus Test: {omnibus_name} ---")
-        p_str = f"{result.omnibus_p_value:.4f}" if result.omnibus_p_value >= 0.0001 else f"{result.omnibus_p_value:.2e}"
-        if result.ppi_applied:
-            # Corrected p FIRST. The uncorrected one is the number a reader
-            # must not report, so it goes last and carries its own warning:
-            # leading with it invites copying the wrong value into a paper.
-            if result.omnibus_corrected_p_value is not None:
-                cp = result.omnibus_corrected_p_value
-                cp_str = f"{cp:.4f}" if cp >= 0.0001 else f"{cp:.2e}"
-                print(f"  PPI-corrected p = {cp_str}")
-            _print_label_efficiency_lines(result)
-            print(f"  uncorrected: statistic = {result.omnibus_statistic:.4f}, p = {p_str}")
-            print(f"      ^ do not report this one. It treats the judge's scores as "
-                  f"if they were human labels.")
-        else:
-            print(f"  statistic = {result.omnibus_statistic:.4f}   p = {p_str}")
-        print()
+        _print_omnibus_section(
+            label=result.omnibus_test_name,
+            statistic=result.omnibus_statistic,
+            p_value=result.omnibus_p_value,
+            corrected_p_value=result.omnibus_corrected_p_value,
+            ppi_applied=result.ppi_applied,
+            rho2_eff=result.omnibus_rho2,
+            n_eff=result.omnibus_n_eff,
+            n_lab_per_entity=result.n_lab_per_condition,
+        )
 
     # ── Pairwise table (includes critical-difference rank bands) ───────────
     _print_pairwise_section(result, line_width=line_width, style=style)
@@ -4179,7 +4256,7 @@ def _print_next_steps_guidance(
             target_half = min_meaningful_diff / 2.0
             n_needed = int(np.ceil(N * (max_ci_half / max(target_half, 1e-12)) ** 2))
             if n_needed > N:
-                print(f"  Your biggest lever: more inputs.")
+                print(f"  How you might get more certain if there's a difference: more inputs.")
                 print(f"  To have a reasonable shot at detecting a gap of {min_meaningful_diff:g},")
                 print(f"  try roughly {n_needed:,} inputs (from {N:,} now).")
             else:
@@ -4187,7 +4264,7 @@ def _print_next_steps_guidance(
                 print(f"  More data probably won't change the picture much.")
         else:
             n_needed_rough = N * 4
-            print(f"  Your biggest lever: more inputs. At {N:,}, gaps smaller than ~{2*max_ci_half:.3f}")
+            print(f"  How you might get more certain if there's a difference: more inputs. At {N:,}, gaps smaller than ~{2*max_ci_half:.3f}")
             print(f"  are generally invisible to this test.")
             print(f"  Rough guide: ~{n_needed_rough:,} inputs could resolve gaps as small as ±{max_ci_half/2:.3f}.")
         if run_fraction is not None and run_fraction > 0.3:
@@ -4203,7 +4280,7 @@ def _print_next_steps_guidance(
         print(f"  (±{max_ci_half:.3f}). This could be a real difference the data isn't quite")
         print(f"  large enough to confirm — or it could be noise.")
         print()
-        print(f"  Your biggest lever: more inputs.")
+        print(f"  How you might get more certain if there's a difference: more inputs.")
         if min_meaningful_diff is not None:
             target_half = min_meaningful_diff / 2.0
             n_needed = int(np.ceil(N * (max_ci_half / max(target_half, 1e-12)) ** 2))

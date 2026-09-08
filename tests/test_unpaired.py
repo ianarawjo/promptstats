@@ -334,7 +334,7 @@ class TestGroupComparisonResultReporting:
         with redirect_stdout(buf):
             r.summary()
         out = buf.getvalue()
-        assert "Between-subjects comparison" in out
+        assert "Shape: BetweenGroups(" in out
         assert "Kruskal-Wallis" in out
 
     def test_plot_not_implemented(self):
@@ -773,11 +773,10 @@ class TestCompareUnpairedPareto:
 # ─────────────────────────────────────────────────────────────────────────────
 
 class TestPValuesOmnibusToggles:
-    """p_values=/omnibus= are unpaired-specific opt-outs (default True, not
-    compare()'s own False) -- see PLAN discussion + api.py's design=
-    docstring. Verifies both the default (unset) preserves the always-shown
-    behavior this path was built and battle-tested with, and that explicit
-    False actually suppresses.
+    """p_values=/omnibus= default to False on the unpaired path, same as
+    compare()'s own default on the paired path -- see api.py's design=
+    docstring. Verifies both the default (unset) hides them exactly like
+    the paired path does, and that explicit True actually shows them.
     """
 
     def _df(self):
@@ -789,45 +788,56 @@ class TestPValuesOmnibusToggles:
                              "score": float(np.clip(rng.normal(mean, 0.15), 0, 1))})
         return pd.DataFrame(rows)
 
-    def test_default_shows_both(self):
+    def test_default_hides_both(self):
         evaldata = es.load_from(self._df())
         r = es.compare(evaldata, factors="model", metric="score", design="unpaired", rng=1)
-        assert r.show_p_values is True
-        assert r.omnibus_test_name is not None
-        buf = io.StringIO()
-        with redirect_stdout(buf):
-            r.summary()
-        out = buf.getvalue()
-        assert "Omnibus Test" in out
-        assert "  p" in out or "p " in out
-
-    def test_p_values_false_hides_column_keeps_data(self):
-        evaldata = es.load_from(self._df())
-        r = es.compare(evaldata, factors="model", metric="score", design="unpaired",
-                        p_values=False, rng=1)
         assert r.show_p_values is False
-        # underlying values still computed and accessible programmatically
-        assert all(p.p_value is not None for p in r.pairwise)
-        assert "p_value" in r.to_frame().columns
-        buf = io.StringIO()
-        with redirect_stdout(buf):
-            r.summary()
-        out = buf.getvalue()
-        assert "Verdict reflects" not in out  # p-correction footnote suppressed
-
-    def test_omnibus_false_skips_computation_entirely(self):
-        evaldata = es.load_from(self._df())
-        r = es.compare(evaldata, factors="model", metric="score", design="unpaired",
-                        omnibus=False, rng=1)
         assert r.omnibus_test_name is None
         assert r.omnibus_statistic is None
         assert r.omnibus_p_value is None
         buf = io.StringIO()
         with redirect_stdout(buf):
             r.summary()
-        assert "Omnibus Test" not in buf.getvalue()
+        out = buf.getvalue()
+        assert "Omnibus Test" not in out
         # pairwise table is untouched
         assert len(r.pairwise) == 3
+
+    def test_p_values_true_shows_column(self):
+        evaldata = es.load_from(self._df())
+        r = es.compare(evaldata, factors="model", metric="score", design="unpaired",
+                        p_values=True, rng=1)
+        assert r.show_p_values is True
+        # underlying values are computed either way and accessible programmatically
+        assert all(p.p_value is not None for p in r.pairwise)
+        assert "p_value" in r.to_frame().columns
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            r.summary()
+        out = buf.getvalue()
+        assert "  p" in out or "p " in out
+
+    def test_omnibus_true_runs_and_shows_it(self):
+        evaldata = es.load_from(self._df())
+        r = es.compare(evaldata, factors="model", metric="score", design="unpaired",
+                        omnibus=True, rng=1)
+        assert r.omnibus_test_name is not None
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            r.summary()
+        assert "Omnibus Test" in buf.getvalue()
+
+    def test_p_values_false_still_computes_data_when_explicit(self):
+        evaldata = es.load_from(self._df())
+        r = es.compare(evaldata, factors="model", metric="score", design="unpaired",
+                        p_values=False, rng=1)
+        assert r.show_p_values is False
+        assert all(p.p_value is not None for p in r.pairwise)
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            r.summary()
+        out = buf.getvalue()
+        assert "Verdict reflects" not in out  # p-correction footnote suppressed
 
     def test_paired_path_p_values_omnibus_unaffected_by_none_default(self):
         # compare()'s own p_values=/omnibus= defaults changed from False to
@@ -844,6 +854,17 @@ class TestPValuesOmnibusToggles:
         r_default = es.compare(evaldata, factors="model", metric="score")
         r_explicit_false = es.compare(evaldata, factors="model", metric="score",
                                        p_values=False, omnibus=False)
+        assert r_default.to_dict() == r_explicit_false.to_dict()
+
+    def test_unpaired_path_p_values_omnibus_default_matches_paired(self):
+        # Both paths now share the same default (False) -- unset on the
+        # unpaired path is a real no-op relative to explicit False, exactly
+        # like the paired path's own p_values=/omnibus= defaults.
+        evaldata = es.load_from(self._df())
+        r_default = es.compare(evaldata, factors="model", metric="score",
+                                design="unpaired", rng=1)
+        r_explicit_false = es.compare(evaldata, factors="model", metric="score",
+                                       design="unpaired", p_values=False, omnibus=False, rng=1)
         assert r_default.to_dict() == r_explicit_false.to_dict()
 
 

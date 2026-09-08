@@ -242,13 +242,14 @@ class FriedmanResult:
     level — no additional correction needed).
     """
 
-    statistic: float                          # Friedman χ² statistic
+    statistic: float                          # Friedman χ² statistic (uncorrected LLM-only, always)
     df: int                                   # degrees of freedom = k - 1
-    p_value: float                            # omnibus p-value
+    p_value: float                            # omnibus p-value (uncorrected, from the raw LLM scores)
     nemenyi_p: dict[tuple[str, str], float]  # upper-triangle pairwise p-values
     avg_ranks: dict[str, float]              # mean rank per template (1 = best)
     n_inputs: int                             # N blocks
     n_templates: int                          # k treatments
+    corrected_p_value: Optional[float] = None  # PPI-corrected omnibus p, when alignment= was passed
 
     def get_nemenyi_p(self, a: str, b: str) -> Optional[float]:
         """Return Nemenyi p for a pair regardless of storage order."""

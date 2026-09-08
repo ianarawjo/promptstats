@@ -86,6 +86,12 @@ class GroupStat:
     ci_high: float
     method: str
     multi_ci: Optional[dict] = None  # {alpha: (lo, hi)} gradient CI bands
+    # median/cv/iqr/cvar_10/percentiles from the RAW (uncorrected) scores --
+    # mirrors the paired path's Descriptive Statistics table, which likewise
+    # leaves these uncorrected even when its mean/CI are PPI-corrected (only
+    # RobustnessResult.mean/ci_low/ci_high/multi_ci get overridden in place;
+    # see api.py's PPI-correction block).
+    descriptive: Optional[dict] = None
 
 
 class _GroupStatsAsRobustness:
@@ -717,8 +723,18 @@ def _compute_group_stats(
         )
         _, ppi_robustness_method = resolve_ppi_auto_methods(data_kind)
 
+    def _desc_dict(rob) -> dict:
+        return {
+            "median": float(rob.median[0]), "cv": float(rob.cv[0]), "iqr": float(rob.iqr[0]),
+            "cvar_10": float(rob.cvar_10[0]),
+            "p10": float(rob.percentiles[10][0]), "p25": float(rob.percentiles[25][0]),
+            "p50": float(rob.percentiles[50][0]), "p75": float(rob.percentiles[75][0]),
+            "p90": float(rob.percentiles[90][0]),
+        }
+
     out = []
     for i, (label, arr) in enumerate(zip(labels, arrays)):
+        a2d = arr.reshape(1, -1)
         if ppi_applied:
             lab_arr = lab_arrays[i]
             res = _ppi_robustness_dispatch(ppi_robustness_method, arr, lab_arr, alpha, n_bootstrap, rng, ppi_score_range)
@@ -726,14 +742,17 @@ def _compute_group_stats(
             for a in GRADIENT_CI_ALPHAS:
                 g = _ppi_robustness_dispatch(ppi_robustness_method, arr, lab_arr, a, n_bootstrap, rng, ppi_score_range)
                 multi_ci[a] = (float(g.ci_low), float(g.ci_high))
+            # Cheap extra pass (n_bootstrap=None -> no CI computed) purely for
+            # the raw median/cv/iqr/percentiles the PPI dispatch above doesn't
+            # provide -- see GroupStat.descriptive.
+            desc = _desc_dict(robustness_metrics(a2d, ["_"], n_bootstrap=None))
             out.append(GroupStat(
                 label=label, n=int(arr.size), mean=float(res.estimate), std=float(np.std(arr)),
                 ci_low=float(res.ci_low), ci_high=float(res.ci_high),
-                method=ppi_robustness_method, multi_ci=multi_ci,
+                method=ppi_robustness_method, multi_ci=multi_ci, descriptive=desc,
             ))
             continue
 
-        a2d = arr.reshape(1, -1)
         _, robustness_method, resolved_score_range, _ = resolve_auto_robustness_method(
             a2d, score_range=score_range, eval_type=eval_type, stacklevel=4,
         )
@@ -751,7 +770,7 @@ def _compute_group_stats(
             label=label, n=int(arr.size), mean=float(rob.mean[0]), std=float(rob.std[0]),
             ci_low=float(rob.ci_low[0]) if rob.ci_low is not None else float("nan"),
             ci_high=float(rob.ci_high[0]) if rob.ci_high is not None else float("nan"),
-            method=robustness_method, multi_ci=multi_ci,
+            method=robustness_method, multi_ci=multi_ci, descriptive=_desc_dict(rob),
         ))
     return out
 

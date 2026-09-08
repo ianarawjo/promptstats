@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import warnings
 
 import numpy as np
@@ -698,14 +699,21 @@ def test_pareto_table_entity_column_capped_for_long_names():
         result.summary()
     out = buf.getvalue()
     pareto_section = out[out.index("Pareto Front"):out.index("Executive Summary")]
+    # Table rows now lead with a single-char "#" marker column (matching the
+    # scatterplot's per-entity numbering) before the entity name -- strip it
+    # off before checking where the (truncated) name starts.
+    def _drop_marker(line: str) -> str:
+        return re.sub(r"^\S\s+", "", line.strip())
+
     # No line in the table should run away to the full untruncated name length.
     table_lines = [
         l for l in pareto_section.splitlines()
-        if l.strip().startswith(models[0][:10]) or l.strip().startswith(models[1][:10])
+        if _drop_marker(l).startswith(models[0][:10]) or _drop_marker(l).startswith(models[1][:10])
     ]
     assert table_lines
     for line in table_lines:
-        assert len(line) < len(models[0]) + 40
+        # +40 budget, plus the leading "#  " marker column's own width.
+        assert len(line) < len(models[0]) + 40 + 3
 
 
 def test_pareto_scatter_flags_near_degenerate_axis():
