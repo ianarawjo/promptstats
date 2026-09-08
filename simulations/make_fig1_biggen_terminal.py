@@ -141,6 +141,9 @@ def main() -> None:
     ap.add_argument("--save-output", default=None)
     ap.add_argument("--data-only", action="store_true",
                     help="Write the spreadsheet and stop, for the CLI to analyze (see fig1.sh).")
+    ap.add_argument("--human-only-out", default=None,
+                    help="Also write the human-labeled instances alone, their expert rating as the "
+                         "metric and no judge column: what the same labeling budget buys unaided.")
     args = ap.parse_args()
 
     warnings.filterwarnings("ignore")
@@ -161,6 +164,15 @@ def main() -> None:
           f"{args.n_items} instances, {args.n_lab} human-rated, seed={args.seed}"
           + (f", capability={args.capability}" if args.capability else ""))
     print(f"# spreadsheet: {out_csv} ({len(df)} rows; {n_lab_rows} with human ratings)")
+
+    if args.human_only_out:
+        human = (df[df[human_col].notna()][["item", "model", human_col]]
+                 .rename(columns={human_col: "human_rating"}))
+        Path(args.human_only_out).parent.mkdir(parents=True, exist_ok=True)
+        human.to_csv(args.human_only_out, index=False)
+        print(f"# human-only:  {args.human_only_out} ({len(human)} rows, "
+              f"{human['item'].nunique()} instances)")
+
     print()
     if args.data_only:
         return
