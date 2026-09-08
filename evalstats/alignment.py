@@ -15,6 +15,24 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 from scipy.stats import ks_2samp, chi2_contingency, pearsonr, spearmanr, norm
+from scipy.stats import ConstantInputWarning
+
+
+def _quiet_corr(fn, a, b) -> float:
+    """Correlation without scipy's constant-input warning: a bootstrap
+    resample can be constant, and NaN is the right answer there."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", ConstantInputWarning)
+        r, _ = fn(a, b)
+    return float(r)
+
+
+def _quiet_ks_2samp(a, b):
+    """ks_2samp without the 'exact calculation unsuccessful, switching to
+    asymp' RuntimeWarning; the asymptotic p-value is what gets used."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        return ks_2samp(a, b)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -950,8 +968,7 @@ def _compute_alignment_metrics(
 
     else:  # continuous
         def pe(a, b):
-            r, _ = pearsonr(a, b)
-            return float(r)
+            return _quiet_corr(pearsonr, a, b)
 
         metrics.update(_pearson_spearman_metrics(
             llm, human, alpha=alpha, rng=rng, ci2_fn=_ci2,
@@ -1220,7 +1237,7 @@ def _check_score_distribution(
                     "this test"
                 ),
             }
-        _, p = ks_2samp(labeled_scores, compare_target)
+        _, p = _quiet_ks_2samp(labeled_scores, compare_target)
         p = float(p)
         passed = p >= _REP_ALPHA
         msg = f"KS p={p:.3f}"
@@ -1317,7 +1334,7 @@ def _check_slice_column_numeric(
                 "this test"
             ),
         }
-    _, p = ks_2samp(labeled, unlabeled)
+    _, p = _quiet_ks_2samp(labeled, unlabeled)
     p = float(p)
     passed = p >= _REP_ALPHA
     msg = f"KS p={p:.3f}"
@@ -1430,7 +1447,9 @@ def _runs_test_pvalue(n1: int, n2: int, r_obs: int) -> float:
     return float(2 * norm.sf(abs(z)))
 
 
-def _check_label_contiguity(n_total: int, labeled_mask: np.ndarray) -> dict:
+def _check_label_contiguity(
+    n_total: int, labeled_mask: np.ndarray, item_ids: Optional[np.ndarray] = None,
+) -> dict:
     """Runs test on where the labeled items sit in the dataset.
 
     Unlike the distribution-based checks above, this doesn't look at scores
@@ -1461,7 +1480,19 @@ def _check_label_contiguity(n_total: int, labeled_mask: np.ndarray) -> dict:
         "blocks, or artificially regular spacing) in one check, rather than "
         "only the single-contiguous-block special case."
     )
-    n_labeled = int(labeled_mask.sum())
+    mask = np.asarray(labeled_mask).astype(bool)
+    if item_ids is not None and len(item_ids) == len(mask):
+        # One entry per distinct item, in first-appearance order. In a paired
+        # design every condition's row for a labeled item is labeled, so the
+        # row sequence has runs of length k by construction; the question is
+        # whether the labeled ITEMS cluster.
+        codes, uniques = pd.factorize(pd.Series(np.asarray(item_ids)), sort=False)
+        if len(uniques) < len(mask):
+            item_mask = np.zeros(len(uniques), dtype=bool)
+            np.logical_or.at(item_mask, codes, mask)
+            mask = item_mask
+            n_total = len(uniques)
+    n_labeled = int(mask.sum())
     n_unlabeled = n_total - n_labeled
     if n_labeled < 2 or n_unlabeled < 2:
         return {
@@ -1472,7 +1503,6 @@ def _check_label_contiguity(n_total: int, labeled_mask: np.ndarray) -> dict:
                 "so there's no position pattern to check"
             ),
         }
-    mask = labeled_mask.astype(bool)
     r_obs = _count_runs(mask)
     p = _runs_test_pvalue(n_labeled, n_unlabeled, r_obs)
     mu = 1.0 + 2.0 * n_labeled * n_unlabeled / n_total
@@ -1595,6 +1625,7 @@ def _judge_alignment_core(
     slice_labeled_mask: Optional[pd.Series] = None,
     slice_exclude_cols: frozenset = frozenset(),
     labeled_mask: Optional[np.ndarray] = None,
+    item_ids: Optional[np.ndarray] = None,
     selection: str = "unknown",
     test: Optional[str] = None,
     per_condition_metrics: Optional[dict] = None,
@@ -1682,7 +1713,7 @@ def _judge_alignment_core(
                 )
 
     if labeled_mask is not None:
-        contiguity_result = _check_label_contiguity(n_total, labeled_mask)
+        contiguity_result = _check_label_contiguity(n_total, labeled_mask, item_ids=item_ids)
         rep["label_contiguity"] = contiguity_result
         if not contiguity_result["passed"]:
             warnings.warn(
@@ -1852,7 +1883,10 @@ def _judge_alignment_from_evaldata(
         alpha=alpha, n_total=n_total, all_llm=all_llm,
         slice_df=df, slice_labeled_mask=labeled_mask,
         slice_exclude_cols=frozenset({llm_metric, human_groundtruth}) | structural_cols,
-        labeled_mask=labeled_mask.to_numpy(), selection=selection, ci=ci,
+        labeled_mask=labeled_mask.to_numpy(),
+        item_ids=(df[evaldata._col["item"]].to_numpy()
+                  if evaldata._col.get("item") in df.columns else None),
+        selection=selection, ci=ci,
         per_condition_metrics=per_condition_metrics,
         warn_stacklevel=4,
     )
@@ -2262,12 +2296,10 @@ def _pearson_spearman_metrics(
     n = len(judge)
 
     def pe(a, b):
-        r, _ = pearsonr(a, b)
-        return float(r)
+        return _quiet_corr(pearsonr, a, b)
 
     def sp(a, b):
-        r, _ = spearmanr(a, b)
-        return float(r)
+        return _quiet_corr(spearmanr, a, b)
 
     est, lo, hi = ci2_fn(pe, judge, human, alpha=alpha, rng=rng)
     band, interp, example = _interpret_corr(est, lo, hi, n, pearson_label)
@@ -2358,8 +2390,7 @@ def _single_metric(
     n = len(judge)
 
     def pe(a, b):
-        r, _ = pearsonr(a, b)
-        return float(r)
+        return _quiet_corr(pearsonr, a, b)
 
     est, lo, hi = _bootstrap_ci_2(pe, judge, human, alpha=alpha, rng=rng)
     band, interp, example = _interpret_corr(est, lo, hi, n, label)

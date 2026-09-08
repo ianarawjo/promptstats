@@ -829,10 +829,9 @@ def resolve_auto_robustness_method(
         data_kind = "binary"
         if eval_type is not None:
             warnings.warn(
-                f"eval_type={eval_type!r} was given, but the data was "
+                f"score_type={eval_type!r} was given, but the data was "
                 "auto-detected as binary (0/1) -- binary data always uses "
-                "the binary methods regardless of eval_type, so this hint "
-                "was ignored.",
+                "the binary methods, so this hint was ignored.",
                 UserWarning,
                 stacklevel=stacklevel,
             )
@@ -871,8 +870,8 @@ def resolve_auto_robustness_method(
                         "logit-t, the same as continuous data, pending "
                         "their own validation -- see "
                         "config.AUTO_ANALYZE_METHOD_TABLE's 'likert' row. "
-                        "Pass eval_type='likert' explicitly to silence this "
-                        "warning, or eval_type='continuous' if this "
+                        "Pass score_type='likert' explicitly to silence this "
+                        "warning, or score_type='continuous' if this "
                         "discreteness is coincidental (e.g. a metric that "
                         "happens to only take a few values in your sample).",
                         UserWarning,
